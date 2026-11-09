@@ -79,3 +79,11 @@ def test_candles_are_chainlink_spot_and_rebuild_the_settlement_twap():
     sigma = sigma_from_candles(bars, now=w.open_unix + 30)
     assert sigma is not None and 1e-5 < sigma < 1e-2
     assert parse_candles({**_load("limitless_candles.json"), "source": "pyth"}) == {}
+
+
+def test_price_to_beat_placeholder_before_the_open_is_none():
+    m = _load("limitless_open.json")
+    m["metadata"]["openPrice"] = "---"  # what the venue sends before the bell
+    m["status"] = "CREATED"
+    w = parse_market(m)
+    assert w.price_to_beat is None and official_outcome(w) is None

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 WINDOW_SECONDS = 300
@@ -46,9 +46,16 @@ def _unix(iso: Any) -> int | None:
 
 
 def _price(value: Any, *, raw18: bool = False) -> float | None:
+    """Decimal string to float. Placeholders are None: before the open the
+    venue sends openPrice "---" (seen 9 Nov 2026)."""
     if value in (None, ""):
         return None
-    d = Decimal(str(value))
+    try:
+        d = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    if not d.is_finite() or d <= 0:
+        return None
     return float(d / Decimal(10) ** 18) if raw18 else float(d)
 
 
