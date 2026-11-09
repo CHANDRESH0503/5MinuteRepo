@@ -20,6 +20,7 @@ The repository package is `fivemin` 0.1.0 (`src/fivemin/`). It requires Python 3
 | `fivemin.book` | `parse_book`. Sorts by price; the wire lists the best price last on both sides. |
 | `fivemin.paper` | `walk_asks`, `rest`, `RestingOrder.on_trade`, markouts, rebate line, `sleeve`. The fill model below, pure. Not wired to an engine yet. |
 | `fivemin.recorder` | Phase 1 recorder: Gamma discovery, CLOB book by REST poll, official outcome. `ReferenceFeed` is the PolyBolt seam; `NullFeed` records no fair value. |
+| `fivemin.polybolt` | Chainlink spot and 60 s TWAP from PolyBolt. Rejects non-Chainlink points, keys prints by source second, treats seq gaps as holes. |
 | `fivemin.report` | Reduces the log to the Phase 1 gates and the dashboard state. |
 | `fivemin.dashboard` | Read-only page over the log on 127.0.0.1. Every number is `report.state(log)`. |
 
@@ -240,4 +241,7 @@ Checked against live Gamma and CLOB responses, saved under `tests/fixtures/` and
 - `decide()` can emit a passive bid at or above the best ask. The engine must pass every passive price through `paper.rest`, which refuses a crossing quote.
 - `parse_event` previously defaulted a missing `takerOnly` to true, a missing tick to 0.01 and a missing `orderMinSize` to 0. Those are now `None` and skip the window.
 
-Not wired: the PolyBolt Chainlink feed. Until it is, every tick records `no fair value`, `local_call` is null, and gate 1 counts the window as resolved without a local call, never as a match.
+- PolyBolt's reference-price channels require CLOB API credentials (`{"op":"auth"}` with apiKey, secret, passphrase). An unauthenticated subscribe to `price.crypto` and `price.crypto.twap` answered `auth_required` on 9 Nov 2026. "Phase 1 and Phase 2 can read the public market and book feeds without a wallet" holds for Gamma and the CLOB book, not for `K` and `S`. Deriving CLOB API credentials needs a wallet signature, so the operator does that once, outside this code, and sets `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_API_PASSPHRASE`. Read-only credentials on an unfunded wallet are enough; nothing here places an order.
+- Every PolyBolt point carries `source` (`chainlink`, `pyth`, `binance`). The `provider` pin may be ignored by the server, and the docs' own example snapshot is `pyth`. `fivemin.polybolt` rejects any point that is not `chainlink` and counts it.
+
+Without those credentials the recorder runs `NullFeed`. Then every tick records `no fair value`, `local_call` is null, and gate 1 counts the window as resolved without a local call, never as a match.

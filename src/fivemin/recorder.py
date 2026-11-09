@@ -11,11 +11,11 @@ What is wired here, from the public endpoints checked on 9 Nov 2026:
     a stand-in for the market websocket; book age is our receipt age)
   * Official outcome Gamma `closed`, `umaResolutionStatus`, `outcomePrices`
 
-What is NOT wired: the Chainlink reference on PolyBolt. `ReferenceFeed` is the
-seam. With `NullFeed`, S, K and sigma are null, `fair_up` is never called and
-every record says "no fair value". That is the honest state, not a bug. A
-PolyBolt adapter must fill `spot`, `twap60`, `minute_spots` and
-`final_minute_prices` from `full_accuracy_value`, and log raw frames.
+The Chainlink reference comes from PolyBolt (`fivemin.polybolt`), which needs
+CLOB API credentials in POLY_API_KEY / POLY_API_SECRET / POLY_API_PASSPHRASE.
+Without them the recorder runs `NullFeed`: S, K and sigma are null, `fair_up`
+is never called and every record says "no fair value". Raw PolyBolt frames are
+appended to `<out>.polybolt.jsonl` so the first live run checks the schema.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ class ReferenceFeed(Protocol):
 
 
 class NullFeed:
-    name = "chainlink not wired"
+    name = "chainlink: no CLOB API credentials (PolyBolt answers auth_required)"
 
     def spot(self) -> float | None:
         return None
@@ -259,7 +259,13 @@ def main() -> None:
     ap.add_argument("--clip", type=float, required=True, help="config, must be >= orderMinSize")
     ap.add_argument("--seconds", type=float, default=None)
     args = ap.parse_args()
-    Recorder(args.out, args.clip, NullFeed()).run(args.seconds)
+    feed: ReferenceFeed = NullFeed()
+    from fivemin.polybolt import PolyBoltFeed, credentials_from_env
+
+    credentials = credentials_from_env()
+    if credentials is not None:
+        feed = PolyBoltFeed(credentials, raw_log=args.out.with_name(args.out.stem + ".polybolt.jsonl"))
+    Recorder(args.out, args.clip, feed).run(args.seconds)
 
 
 if __name__ == "__main__":
