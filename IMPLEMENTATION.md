@@ -245,3 +245,9 @@ Checked against live Gamma and CLOB responses, saved under `tests/fixtures/` and
 - Every PolyBolt point carries `source` (`chainlink`, `pyth`, `binance`). The `provider` pin may be ignored by the server, and the docs' own example snapshot is `pyth`. `fivemin.polybolt` rejects any point that is not `chainlink` and counts it.
 
 Without those credentials the recorder runs `NullFeed`. Then every tick records `no fair value`, `local_call` is null, and gate 1 counts the window as resolved without a local call, never as a match.
+
+## Indian blocking order (checked 9 Nov 2026)
+
+`polymarket.com` and its API hosts are under a governmental blocking order for India. Google Public DNS answers `REFUSED` with Extended DNS Error 16 (Censored): "subject to a judicial injunction or other governmental blocking order for IN", Lumen notice 41503850. The same answer comes back from an Indian VPS (AS152565) and from an Indian home connection. Some Indian resolvers do not enforce it yet, which is the only reason any Indian machine reaches the venue.
+
+Polymarket's own geoblock endpoint returned `blocked: false` for an Indian IP that day. That endpoint reflects Polymarket's restrictions, not Indian law. Do not change a resolver, add a hosts entry, use a VPN, or rent an offshore server to get around the order. Phase 3 (real money) from India needs a legal answer first, not a technical one.
