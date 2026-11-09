@@ -1,0 +1,13 @@
+[project]
+name = "fivemin"
+version = "0.1.0"
+description = "Read-only research core for Polymarket 5-minute BTC Up/Down markets."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]

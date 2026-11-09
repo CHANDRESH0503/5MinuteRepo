@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fivemin · BTC 5m paper desk</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --surface-0: #f4f3f0; --surface-1: #fcfcfb; --rule: #e4e2dc; --grid: #ecebe6;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7c7b76;
+  --up: #2a78d6; --down: #eb6834; --band: rgba(42,120,214,.10); --mid: #52514e;
+  --good: #0ca30c; --warning: #b07a00; --critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --surface-0: #111110; --surface-1: #1a1a19; --rule: #2c2c2a; --grid: #252523;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --up: #3987e5; --down: #d95926; --band: rgba(57,135,229,.16); --mid: #c3c2b7;
+    --good: #0ca30c; --warning: #fab219; --critical: #e66767;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --surface-0: #111110; --surface-1: #1a1a19; --rule: #2c2c2a; --grid: #252523;
+  --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+  --up: #3987e5; --down: #d95926; --band: rgba(57,135,229,.16); --mid: #c3c2b7;
+  --good: #0ca30c; --warning: #fab219; --critical: #e66767;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.viz-root { min-height: 100vh; background: var(--surface-0); color: var(--text-primary);
+  font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; padding: 16px 20px 28px; }
+.num { font-variant-numeric: tabular-nums; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+header { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin-bottom: 14px; }
+h1 { font-size: 15px; margin: 0; font-weight: 600; }
+.chip { display: inline-flex; gap: 6px; align-items: center; padding: 3px 9px; border: 1px solid var(--rule);
+  border-radius: 999px; background: var(--surface-1); color: var(--text-secondary); white-space: nowrap; }
+.chip b { color: var(--text-primary); font-weight: 600; }
+.paper { border-color: var(--good); }
+.banner { display: none; background: var(--critical); color: #fff; padding: 6px 12px; border-radius: 6px; margin-bottom: 12px; font-weight: 600; }
+.clock { flex: 1 1 240px; min-width: 220px; }
+.clock .bar { position: relative; height: 8px; background: var(--grid); border-radius: 4px; overflow: hidden; }
+.clock .fill { position: absolute; inset: 0 auto 0 0; background: var(--text-secondary); border-radius: 4px; }
+.clock .tickmark { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--surface-0); }
+.clock .lbl { display: flex; justify-content: space-between; color: var(--text-muted); font-size: 11px; margin-top: 3px; }
+.grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 2.1fr) minmax(300px, 1fr); }
+.grid2 { display: grid; gap: 14px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 14px; }
+@media (max-width: 1100px) { .grid, .grid2 { grid-template-columns: 1fr; } }
+.card { background: var(--surface-1); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.card h2 { font-size: 12px; font-weight: 600; margin: 0 0 2px; color: var(--text-primary); }
+.card .sub { color: var(--text-muted); font-size: 11.5px; margin-bottom: 10px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--text-secondary); font-size: 11.5px; margin-bottom: 6px; }
+.key { display: inline-block; width: 14px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 5px; }
+.key.dash { border-top-style: dashed; } .key.box { height: 8px; border: 0; border-radius: 2px; }
+svg text { fill: var(--text-muted); font-size: 10.5px; }
+.empty { fill: var(--text-secondary); font-size: 12.5px; }
+.tip { position: fixed; pointer-events: none; display: none; background: var(--surface-1); border: 1px solid var(--rule);
+  border-radius: 8px; padding: 8px 10px; box-shadow: 0 4px 14px rgba(0,0,0,.18); font-size: 12px; z-index: 5; min-width: 170px; }
+.tip .row { display: flex; justify-content: space-between; gap: 14px; color: var(--text-secondary); }
+.tip .row b { color: var(--text-primary); font-weight: 500; }
+.ladders { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ladder table { width: 100%; border-collapse: collapse; }
+.ladder td { padding: 1px 4px; height: 19px; position: relative; }
+.ladder .px { width: 44px; text-align: right; }
+.ladder .sz { text-align: right; color: var(--text-secondary); }
+.ladder .depth { position: absolute; top: 3px; bottom: 3px; right: 0; border-radius: 2px; opacity: .22; }
+.ladder .ask .px { color: var(--text-primary); } .ladder .spread td { height: 8px; border-top: 1px dashed var(--rule); }
+.ladder .ours { outline: 2px solid var(--text-primary); outline-offset: -2px; border-radius: 3px; }
+.ladder .cap { font-weight: 600; margin-bottom: 4px; display: flex; justify-content: space-between; }
+.reason { font-size: 18px; font-weight: 600; margin: 2px 0 8px; }
+.edge-row { display: grid; grid-template-columns: 52px 1fr 64px; gap: 8px; align-items: center; margin: 8px 0; }
+.gate { display: grid; grid-template-columns: 22px 1fr auto; gap: 4px 8px; align-items: start; padding: 8px 0; border-top: 1px solid var(--rule); }
+.gate:first-of-type { border-top: 0; }
+.gate .ico { font-weight: 700; text-align: center; border-radius: 50%; width: 18px; height: 18px; line-height: 18px; font-size: 11px; color: #fff; }
+.gate .ttl { font-weight: 600; } .gate .det { grid-column: 2 / 4; color: var(--text-muted); font-size: 11.5px; }
+.st-pass { background: var(--good); } .st-stop { background: var(--critical); } .st-pending { background: var(--text-muted); }
+.prog { height: 6px; background: var(--grid); border-radius: 3px; margin-top: 4px; overflow: hidden; }
+.prog > div { height: 100%; background: var(--text-secondary); }
+table.win { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.win th { text-align: left; color: var(--text-muted); font-weight: 500; padding: 5px 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+table.win td { padding: 5px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+table.win tr:hover td { background: var(--band); }
+.mix { display: flex; height: 10px; border-radius: 4px; overflow: hidden; gap: 2px; min-width: 120px; }
+.mix > span { display: block; height: 100%; }
+.muted { color: var(--text-muted); } .crit { color: var(--critical); font-weight: 600; } .ok { color: var(--good); font-weight: 600; }
+footer { margin-top: 16px; color: var(--text-muted); font-size: 11.5px; }
+button.theme { background: none; border: 1px solid var(--rule); color: var(--text-secondary); border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="viz-root" id="root">
+  <div class="banner" id="banner">SYNTHETIC LOG — not market data</div>
+  <header>
+    <h1>BTC 5-minute · paper desk</h1>
+    <span class="chip paper" title="No orders leave this machine"><b>PAPER</b> read-only</span>
+    <span class="chip num" id="slug">—</span>
+    <div class="clock">
+      <div class="bar" id="clockbar"><div class="fill" id="clockfill"></div></div>
+      <div class="lbl num"><span>open</span><span id="clocktxt">—</span><span>close</span></div>
+    </div>
+    <span class="chip" id="edge">hurdle —</span>
+    <span class="chip num" id="ages">books —</span>
+    <span class="chip" id="feed">reference —</span>
+    <span class="chip num" id="errs">errors 0</span>
+    <button class="theme" id="theme" title="Toggle light/dark">◐</button>
+  </header>
+
+  <div class="grid">
+    <section class="card">
+      <h2>P(Up) this window — model vs the book</h2>
+      <div class="sub">One axis: probability of Up. Down is 1 − Up. Quotes are what <span class="num">decide()</span> would rest; nothing is placed.</div>
+      <div class="legend">
+        <span><i class="key" style="border-color:var(--up)"></i>model p_up</span>
+        <span><i class="key" style="border-color:var(--mid)"></i>Up book mid</span>
+        <span><i class="key box" style="background:var(--band)"></i>Up bid–ask</span>
+        <span><i class="key dash" style="border-color:var(--up)"></i>passive Up bid/ask</span>
+        <span><i class="key" style="border:0;background:var(--up);height:8px;width:8px;border-radius:50%"></i>the one clip the engine would fill</span>
+        <span><i class="key box" style="background:var(--up);opacity:.45;width:3px"></i>seconds decide() said take</span>
+      </div>
+      <svg id="chart" width="100%" height="330" role="img" aria-label="Probability of Up over the window"></svg>
+    </section>
+
+    <section class="card">
+      <h2>Books, as received</h2>
+      <div class="sub">Best price at the spread line. Outlined rows are decide()'s passive prices that could rest; a price that would cross is flagged, not rested. The two books mirror: an Up ask at x is a Down bid at 1 − x.</div>
+      <div class="ladders">
+        <div class="ladder" id="ladder-up"></div>
+        <div class="ladder" id="ladder-down"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Why this second</h2>
+      <div class="sub">Edge = p − ask − fee(ask). Take needs edge ≥ hurdle, ask size ≥ clip, book age ≤ 1.0 s.</div>
+      <div class="reason" id="reason">—</div>
+      <div id="edges"></div>
+      <div class="sub" style="margin-top:10px">Reasons this window</div>
+      <div class="mix" id="mix"></div>
+      <div class="legend" id="mixlegend" style="margin-top:6px"></div>
+    </section>
+
+    <section class="card">
+      <h2>Phase 1 gates</h2>
+      <div class="sub">Both gates must pass on ≥ 50 resolved windows before any fill logic runs.</div>
+      <div id="gates"></div>
+    </section>
+
+    <section class="card">
+      <h2>Paper engine (Phase 2)</h2>
+      <div class="sub">Judged P&amp;L is after fees, before rebates. Rebates are a separate line.</div>
+      <div id="paper"></div>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:14px">
+    <h2>Windows</h2>
+    <div class="sub">Scored at 60 s after the open (240 s left). Local call is K vs the close TWAP; a tie is Up. Official is Polymarket's resolution.</div>
+    <div style="overflow-x:auto"><table class="win" id="windows"></table></div>
+  </section>
+
+  <footer id="foot">—</footer>
+  <div class="tip" id="tip"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const css = (v) => getComputedStyle($('root')).getPropertyValue(v).trim();
+const fmt = (x, d = 2) => (x === null || x === undefined || Number.isNaN(x)) ? '—' : Number(x).toFixed(d);
+const cents = (x) => { if (x === null || x === undefined) return '—'; const c = x * 100; return (Math.abs(c - Math.round(c)) < 1e-6 ? c.toFixed(0) : c.toFixed(1)) + '¢'; };
+const ns = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(ns, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+const fee = (p, r) => r * p * (1 - p);
+const etTime = (unix) => new Date(unix * 1000).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+const utcTime = (unix) => new Date(unix * 1000).toISOString().slice(11, 16);
+let S = null;
+
+$('theme').onclick = () => {
+  const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  r.dataset.theme = dark ? 'light' : 'dark'; if (S) render(S);
+};
+
+function header(s) {
+  const t = s.last;
+  $('banner').style.display = s.synthetic ? 'block' : 'none';
+  if (!t) { $('slug').textContent = 'waiting for first tick'; return; }
+  const left = Math.max(0, t.seconds_left), el_ = 300 - left;
+  $('slug').innerHTML = `<b>${t.slug}</b> · ${etTime(t.open)}–${etTime(t.open + 300)} ET`;
+  $('clockfill').style.width = (el_ / 300 * 100) + '%';
+  $('clockbar').querySelectorAll('.tickmark').forEach(n => n.remove());
+  for (const m of [60, 180, 240, 280]) { const d = document.createElement('div'); d.className = 'tickmark'; d.style.left = (m / 300 * 100) + '%'; $('clockbar').appendChild(d); }
+  const phase = left > 120 ? 'capped 5–95%' : left > 60 ? 'cap off' : left > 20 ? 'final-minute formula' : 'cancel all, hold to redeem';
+  $('clocktxt').textContent = `${left.toFixed(0)} s left · ${phase}`;
+  const quiet = t.min_edge > 0.03 + 1e-9;
+  $('edge').innerHTML = `hurdle <b>${cents(t.min_edge)}</b> ${quiet ? '(weekend / 09–12 UTC)' : '(base)'}`;
+  const age = (a) => a === null || a === undefined ? '∞' : a.toFixed(2);
+  const stale = (t.up.age ?? 9) > 1 || (t.down.age ?? 9) > 1;
+  $('ages').innerHTML = `${stale ? '<span class="crit">⚠ stale</span>' : '<span class="ok">✓</span>'} books Up <b>${age(t.up.age)}s</b> Down <b>${age(t.down.age)}s</b>`;
+  const wired = t.S !== null && t.K !== null;
+  $('feed').innerHTML = wired
+    ? `<span class="ok">✓</span> Chainlink S <b class="num">${fmt(t.S, 2)}</b> K <b class="num">${fmt(t.K, 2)}</b> σ1m <b class="num">${fmt(t.sigma_1m * 1e4, 1)}bp</b>`
+    : `<span class="crit">✕</span> <b>${t.reference_feed || 'no reference'}</b> — no fair value`;
+  $('errs').innerHTML = s.error_count ? `<span class="crit">⚠ errors ${s.error_count}</span>` : 'errors 0';
+}
+
+function chart(s) {
+  const svg = $('chart'); svg.innerHTML = '';
+  const W = svg.clientWidth || 800, H = 330, m = { l: 40, r: 12, t: 10, b: 28 };
+  const x = (sec) => m.l + (sec / 300) * (W - m.l - m.r), y = (p) => m.t + (1 - p) * (H - m.t - m.b);
+  for (const p of [0, .25, .5, .75, 1]) {
+    el('line', { x1: m.l, x2: W - m.r, y1: y(p), y2: y(p), stroke: css('--grid'), 'stroke-width': 1 }, svg);
+    el('text', { x: m.l - 6, y: y(p) + 3, 'text-anchor': 'end' }, svg).textContent = (p * 100) + '%';
+  }
+  for (const p of [.05, .95]) el('line', { x1: x(0), x2: x(180), y1: y(p), y2: y(p), stroke: css('--text-muted'), 'stroke-dasharray': '2 3', 'stroke-width': 1 }, svg);
+  const marks = [[60, 'score'], [180, 'cap off'], [240, 'last minute'], [280, 'cancel all']];
+  for (const [sec, label] of marks) {
+    el('line', { x1: x(sec), x2: x(sec), y1: m.t, y2: H - m.b, stroke: css('--rule'), 'stroke-width': 1 }, svg);
+    el('text', { x: x(sec) + 3, y: m.t + 10 }, svg).textContent = label;
+  }
+  for (let sec = 0; sec <= 300; sec += 60) el('text', { x: x(sec), y: H - 8, 'text-anchor': 'middle' }, svg).textContent = `${sec / 60}:00`;
+
+  const pts = s.series.map(d => ({ ...d, e: 300 - d.s })).filter(d => d.e >= 0 && d.e <= 300);
+  const path = (key, f = (d) => d[key]) => {
+    let dstr = '', pen = false;
+    for (const d of pts) { const v = f(d); if (v === null || v === undefined) { pen = false; continue; } dstr += (pen ? 'L' : 'M') + x(d.e).toFixed(1) + ',' + y(v).toFixed(1); pen = true; }
+    return dstr;
+  };
+  // bid-ask band
+  let band = '';
+  const seg = pts.filter(d => d.bu !== null && d.au !== null);
+  if (seg.length) { band = 'M' + seg.map(d => `${x(d.e).toFixed(1)},${y(d.au).toFixed(1)}`).join('L') + 'L' + seg.slice().reverse().map(d => `${x(d.e).toFixed(1)},${y(d.bu).toFixed(1)}`).join('L') + 'Z'; }
+  el('path', { d: band, fill: css('--band'), stroke: 'none' }, svg);
+  el('path', { d: path('qbu'), fill: 'none', stroke: css('--up'), 'stroke-width': 1.5, 'stroke-dasharray': '4 3' }, svg);
+  el('path', { d: path('qau'), fill: 'none', stroke: css('--up'), 'stroke-width': 1.5, 'stroke-dasharray': '4 3' }, svg);
+  el('path', { d: path('mu'), fill: 'none', stroke: css('--mid'), 'stroke-width': 2, 'stroke-linejoin': 'round' }, svg);
+  el('path', { d: path('p'), fill: 'none', stroke: css('--up'), 'stroke-width': 2, 'stroke-linejoin': 'round' }, svg);
+  // decide() is stateless and says "take" every second the edge holds. The engine fills one clip per
+  // window, so only the first is a dot; the rest is a rug of seconds where decide() would have taken.
+  const takes = pts.filter(d => d.take);
+  for (const d of takes) el('rect', { x: x(d.e) - 1, y: H - m.b - 5, width: 2, height: 5, fill: d.take === 'up' ? css('--up') : css('--down'), opacity: .45 }, svg);
+  const first = takes[0];
+  if (first && first.e > 280) { /* inside the last 20 s the engine cancels and takes nothing */ }
+  else if (first) {
+    const py = first.take === 'up' ? first.au : (first.ad === null ? null : 1 - first.ad);
+    if (py !== null) {
+      el('circle', { cx: x(first.e), cy: y(py), r: 5, fill: first.take === 'up' ? css('--up') : css('--down'), stroke: css('--surface-1'), 'stroke-width': 2 }, svg);
+      el('text', { x: x(first.e) + 8, y: y(py) + 14 }, svg).textContent = `1 clip ${first.take} @ ${first.take === 'up' ? cents(first.au) : cents(first.ad)}`;
+    }
+  }
+  if (!pts.some(d => d.p !== null)) {
+    const t = el('text', { x: (m.l + W - m.r) / 2, y: m.t + 34, 'text-anchor': 'middle', class: 'empty' }, svg);
+    t.textContent = s.last ? 'No model line: no fair value this window (' + (s.last.reference_feed || 'no reference') + ')' : 'Waiting for the recorder';
+  }
+  // direct labels at the right edge
+  const lastPt = pts[pts.length - 1];
+  if (lastPt) {
+    if (lastPt.mu !== null) el('text', { x: x(lastPt.e) + 6, y: y(lastPt.mu) + 3 }, svg).textContent = 'mid ' + cents(lastPt.mu);
+    if (lastPt.p !== null) el('text', { x: x(lastPt.e) + 6, y: y(lastPt.p) - 6 }, svg).textContent = 'model ' + fmt(lastPt.p * 100, 1) + '%';
+  }
+  // crosshair
+  const cross = el('line', { y1: m.t, y2: H - m.b, stroke: css('--text-secondary'), 'stroke-width': 1, visibility: 'hidden' }, svg);
+  const hit = el('rect', { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: 'transparent' }, svg);
+  const tip = $('tip');
+  hit.onmousemove = (ev) => {
+    if (!pts.length) return;
+    const r = svg.getBoundingClientRect(), e = (ev.clientX - r.left - m.l) / (W - m.l - m.r) * 300;
+    const d = pts.reduce((a, b) => Math.abs(b.e - e) < Math.abs(a.e - e) ? b : a);
+    cross.setAttribute('x1', x(d.e)); cross.setAttribute('x2', x(d.e)); cross.setAttribute('visibility', 'visible');
+    const row = (k, v) => `<div class="row"><span>${k}</span><b class="num">${v}</b></div>`;
+    tip.innerHTML = `<div style="font-weight:600;margin-bottom:4px">${fmt(d.s, 0)} s left</div>` +
+      row('model p_up', d.p === null ? 'none' : fmt(d.p * 100, 1) + '%') + row('Up bid / ask', `${cents(d.bu)} / ${cents(d.au)}`) +
+      row('Up mid', cents(d.mu)) + row('Down bid / ask', `${cents(d.bd)} / ${cents(d.ad)}`) +
+      row('passive Up', `${cents(d.qbu)} / ${cents(d.qau)}`) + row('passive Down', `${cents(d.qbd)} / ${cents(d.qad)}`) +
+      row('take', d.take || 'none');
+    tip.style.display = 'block'; tip.style.left = Math.min(ev.clientX + 14, innerWidth - 200) + 'px'; tip.style.top = (ev.clientY + 12) + 'px';
+  };
+  hit.onmouseleave = () => { tip.style.display = 'none'; cross.setAttribute('visibility', 'hidden'); };
+}
+
+function ladder(node, name, color, book, quotes) {
+  const asks = (book.asks || []).slice(0, 7).reverse(), bids = (book.bids || []).slice(0, 7);
+  const max = Math.max(1, ...asks.map(l => l[1]), ...bids.map(l => l[1]));
+  const [qb, qa] = quotes, bestBid = book.bid, bestAsk = book.ask;
+  // A passive bid at or above the best ask (or ask at or below the best bid) would cross: it is a take,
+  // and the engine does not rest it (paper.rest returns None).
+  const bidCross = qb != null && bestAsk != null && qb >= bestAsk - 1e-9;
+  const askCross = qa != null && bestBid != null && qa <= bestBid + 1e-9;
+  const restable = new Set([[qb, bidCross], [qa, askCross]].filter(([q, c]) => q != null && !c).map(([q]) => q.toFixed(2)));
+  const row = (l, cls) => `<tr class="${cls}${restable.has(l[0].toFixed(2)) ? ' ours' : ''}"><td class="px num">${cents(l[0])}</td>` +
+    `<td class="sz num"><span class="depth" style="width:${(l[1] / max * 100).toFixed(1)}%;background:${color}"></span>${Math.round(l[1]).toLocaleString()}</td></tr>`;
+  const q = (v, cross, what) => v == null ? '—' : cross ? `<span class="crit" title="would cross the ${what}; a take, not rested">${cents(v)} ✕ crosses</span>` : cents(v);
+  node.innerHTML = `<div class="cap"><span><i class="key box" style="background:${color}"></i>${name}</span><span class="muted num">mid ${cents(book.mid)}</span></div>` +
+    `<table>${asks.map(l => row(l, 'ask')).join('')}<tr class="spread"><td colspan="2"></td></tr>${bids.map(l => row(l, 'bid')).join('')}</table>` +
+    `<div class="muted num" style="font-size:11px;margin-top:4px">passive bid ${q(qb, bidCross, 'ask')} · ask ${q(qa, askCross, 'bid')}</div>`;
+}
+
+const REASON_ORDER = ['take up', 'take down', 'quote', 'pair under a dollar, log only', 'skip', 'no fair value'];
+const reasonColor = (r) => r.startsWith('take up') ? css('--up') : r.startsWith('take down') ? css('--down') : r === 'no fair value' ? css('--text-muted') : r === 'quote' ? css('--text-secondary') : css('--rule');
+
+function why(s) {
+  const t = s.last; if (!t) return;
+  const d = t.decision || {};
+  $('reason').textContent = d.reason || '—';
+  const rows = [['Up', t.p_up, t.up, 'var(--up)'], ['Down', t.p_up === null ? null : 1 - t.p_up, t.down, 'var(--down)']];
+  const span = 0.15;
+  $('edges').innerHTML = rows.map(([name, p, b, col]) => {
+    if (p === null || b.ask === null) return `<div class="edge-row"><span>${name}</span><span class="muted">no edge: ${p === null ? 'no fair value' : 'no ask'}</span><span></span></div>`;
+    const e = p - b.ask - fee(b.ask, t.fee_rate), pos = (v) => Math.max(0, Math.min(100, (v + span) / (2 * span) * 100));
+    return `<div class="edge-row"><span>${name}</span><svg width="100%" height="18" viewBox="0 0 100 18" preserveAspectRatio="none">
+      <rect x="0" y="7" width="100" height="4" rx="2" fill="${css('--grid')}"/>
+      <line x1="${pos(t.min_edge)}" x2="${pos(t.min_edge)}" y1="1" y2="17" stroke="${css('--text-primary')}" stroke-width="1.2" vector-effect="non-scaling-stroke"/>
+      <line x1="${pos(0)}" x2="${pos(0)}" y1="4" y2="14" stroke="${css('--text-muted')}" stroke-width="1" vector-effect="non-scaling-stroke"/>
+      <rect x="${Math.min(pos(0), pos(e))}" y="6" width="${Math.abs(pos(e) - pos(0))}" height="6" rx="2" fill="${col}"/></svg>
+      <span class="num" title="edge vs hurdle ${cents(t.min_edge)}">${(e * 100).toFixed(1)}¢ ${e >= t.min_edge ? '✓' : ''}</span></div>`;
+  }).join('') + `<div class="muted" style="font-size:11px">Tick mark = hurdle ${cents(t.min_edge)}; scale ±15¢. split_ok ${d.split_ok ? '✓' : '✕'} · pair_lock ${d.pair_lock ? '✓ (log only)' : '✕'}</div>`;
+  const entries = Object.entries(s.reasons_now).sort((a, b) => REASON_ORDER.indexOf(a[0]) - REASON_ORDER.indexOf(b[0]));
+  const total = entries.reduce((a, [, n]) => a + n, 0) || 1;
+  $('mix').innerHTML = entries.map(([r, n]) => `<span title="${r}: ${n}" style="width:${n / total * 100}%;background:${reasonColor(r)}"></span>`).join('');
+  $('mixlegend').innerHTML = entries.map(([r, n]) => `<span><i class="key box" style="background:${reasonColor(r)}"></i>${r} <span class="num">${n}</span></span>`).join('');
+}
+
+function gates(s) {
+  const g = s.phase1, ico = (st) => `<span class="ico st-${st}">${st === 'pass' ? '✓' : st === 'stop' ? '✕' : '…'}</span>`;
+  const label = (st) => st === 'pass' ? '<span class="ok">pass</span>' : st === 'stop' ? '<span class="crit">STOP</span>' : '<span class="muted">pending</span>';
+  const st = g.settlement, br = g.brier;
+  $('gates').innerHTML =
+    `<div class="gate">${ico(st.status)}<span class="ttl">Settlement read matches Polymarket</span>${label(st.status)}
+      <span class="det num">${st.matched}/${g.target} matched · ${st.mismatched} mismatched · ${st.no_local_call} resolved without a local call (no Chainlink close)
+      <div class="prog"><div style="width:${Math.min(100, st.matched / g.target * 100)}%"></div></div></span></div>` +
+    `<div class="gate">${ico(br.status)}<span class="ttl">Brier(p_up) − Brier(mid) ≤ 0.02</span>${label(br.status)}
+      <span class="det num">n=${br.n}/${g.target} · model ${fmt(br.model, 4)} · mid ${fmt(br.mid, 4)} · diff ${fmt(br.diff, 4)}</span></div>` +
+    `<div class="gate">${ico(g.cap.status)}<span class="ttl">No p_up outside 5–95% with &gt;120 s left</span>${label(g.cap.status)}
+      <span class="det num">${g.cap.count} violations</span></div>` +
+    `<div class="muted" style="font-size:11.5px;margin-top:6px">${g.resolved} windows resolved by Polymarket in this log.</div>`;
+}
+
+function paper(s) {
+  const p = s.paper;
+  const tile = (k, v) => `<div><div class="muted" style="font-size:11px">${k}</div><div class="num" style="font-size:17px;font-weight:600">${v}</div></div>`;
+  $('paper').innerHTML = `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">` +
+    tile('engine', p.engine) + tile('fills', p.fills) + tile('judged P&L', '—') +
+    tile('1 s maker markout', '—') + tile('settle markout', '—') + tile('rebate (separate)', '—') + `</div>` +
+    `<div class="muted" style="font-size:11.5px;margin-top:10px">Locked until both Phase 1 gates pass. A day with zero trades is a working record.</div>`;
+}
+
+function windows(s) {
+  const head = '<tr><th>Open (UTC / ET)</th><th>Ticks</th><th>Skip</th><th>p@60s</th><th>mid@60s</th><th>K → close</th><th>Local</th><th>Official</th><th>Match</th><th>Reasons</th></tr>';
+  const body = s.rows.map(r => {
+    const match = r.local && r.official ? (r.local === r.official ? '<span class="ok">✓ match</span>' : '<span class="crit">✕ MISMATCH</span>') : '<span class="muted">—</span>';
+    const tot = Object.values(r.reasons).reduce((a, b) => a + b, 0) || 1;
+    const mix = `<div class="mix" title="${Object.entries(r.reasons).map(([k, v]) => k + ': ' + v).join(', ')}">` + Object.entries(r.reasons).map(([k, v]) => `<span style="width:${v / tot * 100}%;background:${reasonColor(k)}"></span>`).join('') + '</div>';
+    const side = (v) => v ? `<span style="color:${v === 'up' ? css('--up') : css('--down')}">●</span> ${v}` : '<span class="muted">—</span>';
+    return `<tr><td class="num">${utcTime(r.open)} / ${etTime(r.open)}</td><td class="num">${r.ticks}</td>` +
+      `<td>${r.skip_reasons.length ? '<span class="crit">' + r.skip_reasons.join('; ') + '</span>' : '<span class="muted">none</span>'}</td>` +
+      `<td class="num">${r.p_at_score === null ? '—' : fmt(r.p_at_score * 100, 1) + '%'}</td><td class="num">${cents(r.mid_at_score)}</td>` +
+      `<td class="num">${fmt(r.K, 2)} → ${fmt(r.close_twap, 2)}</td><td>${side(r.local)}</td><td>${side(r.official)}</td><td>${match}</td><td>${mix}</td></tr>`;
+  }).join('');
+  $('windows').innerHTML = head + body;
+}
+
+function render(s) {
+  header(s); chart(s); why(s); gates(s); paper(s); windows(s);
+  if (s.last) {
+    const d = s.last.decision || {};
+    ladder($('ladder-up'), 'Up', css('--up'), s.last.up, [d.bid_up, d.ask_up]);
+    ladder($('ladder-down'), 'Down', css('--down'), s.last.down, [d.bid_down, d.ask_down]);
+  }
+  $('foot').textContent = `Reduced from ${s.log} (${s.generated_from.toLocaleString()} records) by fivemin.report.state — the page holds no numbers of its own. Read-only: there is no endpoint that places or sends anything.`;
+}
+
+async function poll() {
+  try { S = await (await fetch('/api/state', { cache: 'no-store' })).json(); render(S); }
+  catch (e) { $('slug').textContent = 'dashboard server unreachable'; }
+  setTimeout(poll, 1000);
+}
+addEventListener('resize', () => S && render(S));
+poll();
+</script>
+</div>
+</body>
+</html>
