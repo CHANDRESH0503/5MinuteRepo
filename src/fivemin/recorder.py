@@ -86,6 +86,7 @@ class Recorder:
         self.out = out
         self.clip = clip
         self.spot = SpotProxy()
+        self.spot.start()
         self.windows: dict[int, CryptoWindow] = {}
         self.pending: dict[int, float] = {}
         self.candles: dict[int, dict[str, float]] = {}
@@ -163,7 +164,6 @@ class Recorder:
             window = self.discover(open_unix, refresh=True)
         if end - now <= 30:
             self.discover(end)
-        self.spot.poll()
         if window is None:
             return
         self.refresh_candles(now, window.slug)

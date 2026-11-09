@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import statistics
+import threading
 import time
 import urllib.request
 from math import log
@@ -118,16 +119,42 @@ class SpotProxy:
         self.by_second: dict[int, float] = {}
         self.last: tuple[float, float] | None = None  # (price, received)
         self.sources: dict[str, float | None] = {}
+        self._lock = threading.Lock()
 
     def record(self, mids: dict[str, float | None], received: float) -> float | None:
-        self.sources = mids
         good = [m for m in mids.values() if m is not None and m > 0]
-        if not good:
-            return None
-        price = statistics.median(good)
-        self.by_second[int(received)] = price
-        self.last = (price, received)
-        return price
+        with self._lock:
+            self.sources = mids
+            if not good:
+                return None
+            price = statistics.median(good)
+            self.by_second[int(received)] = price  # last sample inside each second wins
+            self.last = (price, received)
+            return price
+
+    def start(self, interval: float = 0.5) -> None:
+        """Sample on a background thread so every second gets a price even when
+        the recorder's own loop runs long. The sources are queried in parallel."""
+        def fetch(name: str, url: str, parse, out: dict) -> None:
+            try:
+                out[name] = parse(_get(url, timeout=0.8))
+            except Exception:  # noqa: BLE001
+                out[name] = None
+
+        def loop() -> None:
+            while True:
+                began = time.time()
+                mids: dict[str, float | None] = {}
+                threads = [threading.Thread(target=fetch, args=(n, u, f, mids))
+                           for n, u, f in (("coinbase", COINBASE, coinbase_mid), ("kraken", KRAKEN, kraken_mid))]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+                self.record(mids, time.time())
+                time.sleep(max(0.0, interval - (time.time() - began)))
+
+        threading.Thread(target=loop, daemon=True, name="spot-proxy").start()
 
     def poll(self) -> float | None:
         mids: dict[str, float | None] = {}
@@ -158,8 +185,9 @@ class SpotProxy:
         return None if not prices or len(prices) < 60 else sum(prices) / len(prices)
 
     def prune(self, now: float, keep: int = 900) -> None:
-        for s in [s for s in self.by_second if s < now - keep]:
-            del self.by_second[s]
+        with self._lock:
+            for s in [s for s in self.by_second if s < now - keep]:
+                del self.by_second[s]
 
 
 def bps(a: float | None, b: float | None) -> float | None:
