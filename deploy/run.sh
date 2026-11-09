@@ -5,6 +5,9 @@
 #
 #   PORT=8765 CLIP=5 deploy/run.sh          start / restart
 #   deploy/run.sh stop                      stop only our two processes
+#   NO_RECORDER=1 HOST=127.0.0.1 deploy/run.sh
+#       dashboard only, private; the log arrives from deploy/sync.sh (used on
+#       the India VPS, whose network does not resolve polymarket.com)
 #
 # Chainlink needs POLY_API_KEY / POLY_API_SECRET / POLY_API_PASSPHRASE in
 # ./.env (chmod 600, gitignored). Without it the recorder logs "no fair value".
@@ -31,9 +34,11 @@ fi
 
 [[ -f .env ]] && { set -a; . ./.env; set +a; }
 export PYTHONPATH=src
-nohup .venv/bin/python -m fivemin.recorder --out logs/phase1.jsonl --clip "$CLIP" >> logs/recorder.out 2>&1 &
-echo $! > run/recorder.pid
+if [[ -z "${NO_RECORDER:-}" ]]; then
+  nohup .venv/bin/python -m fivemin.recorder --out logs/phase1.jsonl --clip "$CLIP" >> logs/recorder.out 2>&1 &
+  echo $! > run/recorder.pid
+fi
 nohup .venv/bin/python -m fivemin.dashboard --log logs/phase1.jsonl --host "$HOST" --port "$PORT" >> logs/dashboard.out 2>&1 &
 echo $! > run/dashboard.pid
 sleep 2
-kill -0 "$(cat run/recorder.pid)" && kill -0 "$(cat run/dashboard.pid)" && echo "running: dashboard on $HOST:$PORT"
+kill -0 "$(cat run/dashboard.pid)" && echo "running: dashboard on $HOST:$PORT${NO_RECORDER:+ (no recorder)}"
