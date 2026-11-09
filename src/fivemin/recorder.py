@@ -1,21 +1,16 @@
-"""Phase 1 read-only recorder. Places nothing, simulates nothing.
+"""Phase 1 read-only recorder for Limitless BTC 5-minute markets.
 
     PYTHONPATH=src python -m fivemin.recorder --out logs/phase1.jsonl --clip 5
 
-Appends one JSON object per second, plus one `window` record at discovery and
-one `resolution` record once Polymarket has resolved the window.
+Places nothing, simulates nothing. Appends one JSON object per second, one
+`window` record at discovery, one `basis` record per minute and one
+`resolution` record once Limitless has resolved the window.
 
-What is wired here, from the public endpoints checked on 9 Nov 2026:
-  * Gamma discovery  https://gamma-api.polymarket.com/events?slug=...
-  * CLOB book        https://clob.polymarket.com/book?token_id=...  (REST poll,
-    a stand-in for the market websocket; book age is our receipt age)
-  * Official outcome Gamma `closed`, `umaResolutionStatus`, `outcomePrices`
-
-The Chainlink reference comes from PolyBolt (`fivemin.polybolt`), which needs
-CLOB API credentials in POLY_API_KEY / POLY_API_SECRET / POLY_API_PASSPHRASE.
-Without them the recorder runs `NullFeed`: S, K and sigma are null, `fair_up`
-is never called and every record says "no fair value". Raw PolyBolt frames are
-appended to `<out>.polybolt.jsonl` so the first live run checks the schema.
+Sources, all public and reachable from the India VPS (checked 9 Nov 2026):
+  * Limitless  GET /markets/{slug}              market, K (openPrice), official result
+               GET /markets/{slug}/orderbook    the Up (YES) book; Down is its mirror
+               GET /markets/{slug}/oracle-candles  Chainlink BTC/USD spot, 1-minute
+  * Coinbase and Kraken tickers                 live spot proxy (see reference.py)
 """
 
 from __future__ import annotations
@@ -23,224 +18,241 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import urllib.error
 import urllib.request
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
-from fivemin.book import Book, parse_book
-from fivemin.fair import fair_up, sigma_1m
+from fivemin.book import Book, mirror, parse_book
+from fivemin.fair import fair_up
 from fivemin.market import (
     WINDOW_SECONDS,
     CryptoWindow,
+    local_call,
     official_outcome,
-    parse_event,
+    parse_market,
     skip_reasons,
     slug_for,
     window_start,
 )
+from fivemin.reference import SpotProxy, bps, fetch_candles, sigma_from_candles, twap_estimate
 from fivemin.session import min_edge
 from fivemin.strategy import decide
 
-GAMMA = "https://gamma-api.polymarket.com/events?slug={slug}"
-CLOB_BOOK = "https://clob.polymarket.com/book?token_id={token}"
-UA = {"User-Agent": "fivemin-recorder/0.1 (read-only)"}
+API = "https://api.limitless.exchange"
+UA = {"User-Agent": "fivemin-recorder/0.2 (read-only)"}
 DEPTH = 8
+VENUE = "limitless"
 
 
-class ReferenceFeed(Protocol):
-    name: str
-
-    def spot(self) -> float | None: ...
-    def twap60_at(self, unix: int) -> float | None: ...
-    def minute_spots(self) -> list[float]: ...
-    def final_minute_prices(self, window_end: int, now: float) -> list[float] | None: ...
-
-
-class NullFeed:
-    name = "chainlink: no CLOB API credentials (PolyBolt answers auth_required)"
-
-    def spot(self) -> float | None:
-        return None
-
-    def twap60_at(self, unix: int) -> float | None:
-        return None
-
-    def minute_spots(self) -> list[float]:
-        return []
-
-    def final_minute_prices(self, window_end: int, now: float) -> list[float] | None:
-        return None
-
-
-def _get(url: str, timeout: float = 5.0) -> Any:
+def _get(url: str, timeout: float = 3.0) -> Any:
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
 
-def fetch_window(slug: str, *, closed: bool = False) -> tuple[CryptoWindow, dict] | None:
-    url = GAMMA.format(slug=slug) + ("&closed=true" if closed else "")
-    events = _get(url)
-    if not events:
+def fetch_market(slug: str) -> tuple[CryptoWindow, dict] | None:
+    try:
+        raw = _get(f"{API}/markets/{slug}")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    if not isinstance(raw, dict) or "slug" not in raw:
         return None
-    return parse_event(events[0]), events[0]["markets"][0]
+    return parse_market(raw), raw
 
 
-def fetch_book(token: str) -> Book:
-    raw = _get(CLOB_BOOK.format(token=token))
-    return parse_book(raw, received=time.time())
+def fetch_book(slug: str) -> Book:
+    return parse_book(_get(f"{API}/markets/{slug}/orderbook"), received=time.time())
 
 
 def book_summary(book: Book | None, now: float) -> dict[str, Any]:
     if book is None:
-        return {"bid": None, "bid_size": 0, "ask": None, "ask_size": 0, "mid": None, "age": None}
+        return {"bid": None, "bid_size": 0, "ask": None, "ask_size": 0, "mid": None, "age": None, "bids": [], "asks": []}
     bb, ba = book.best_bid, book.best_ask
     return {
-        "bid": bb[0] if bb else None,
-        "bid_size": bb[1] if bb else 0,
-        "ask": ba[0] if ba else None,
-        "ask_size": ba[1] if ba else 0,
-        "mid": book.mid(),
-        "age": round(book.age(now), 3),
-        "venue_ts": book.timestamp,
-        "bids": book.bids[:DEPTH],
-        "asks": book.asks[:DEPTH],
+        "bid": bb[0] if bb else None, "bid_size": bb[1] if bb else 0,
+        "ask": ba[0] if ba else None, "ask_size": ba[1] if ba else 0,
+        "mid": book.mid(), "age": round(book.age(now), 3),
+        "bids": book.bids[:DEPTH], "asks": book.asks[:DEPTH],
     }
 
 
 class Recorder:
-    def __init__(self, out: Path, clip: float, feed: ReferenceFeed) -> None:
+    def __init__(self, out: Path, clip: float) -> None:
         self.out = out
         self.clip = clip
-        self.feed = feed
+        self.spot = SpotProxy()
         self.windows: dict[int, CryptoWindow] = {}
-        self.k: dict[int, float | None] = {}
-        self.pending: dict[int, float] = {}  # open -> next poll time for the outcome
+        self.pending: dict[int, float] = {}
+        self.candles: dict[int, dict[str, float]] = {}
+        self.candles_at = 0.0
+        self.basis_done: set[int] = set()
         out.parent.mkdir(parents=True, exist_ok=True)
 
     def emit(self, record: dict[str, Any]) -> None:
+        record.setdefault("venue", VENUE)
         with self.out.open("a") as fh:
             fh.write(json.dumps(record, separators=(",", ":")) + "\n")
 
-    def discover(self, open_unix: int) -> CryptoWindow | None:
-        if open_unix in self.windows:
-            return self.windows[open_unix]
-        slug = slug_for("btc", open_unix)
+    def error(self, where: str, exc: Exception, slug: str | None = None) -> None:
+        self.emit({"type": "error", "t": time.time(), "slug": slug, "where": where, "error": repr(exc)[:300]})
+
+    # discovery ------------------------------------------------------------
+    def discover(self, open_unix: int, *, refresh: bool = False) -> CryptoWindow | None:
+        known = self.windows.get(open_unix)
+        if known is not None and not refresh:
+            return known
+        slug = slug_for(open_unix)
         try:
-            got = fetch_window(slug)
-        except Exception as exc:  # noqa: BLE001 - log and retry next second
-            self.emit({"type": "error", "t": time.time(), "slug": slug, "where": "gamma", "error": repr(exc)})
-            return None
+            got = fetch_market(slug)
+        except Exception as exc:  # noqa: BLE001
+            self.error("market", exc, slug)
+            return known
         if got is None:
-            return None
+            return known
         window, raw = got
+        first = known is None
         self.windows[open_unix] = window
-        self.emit({
-            "type": "window",
-            "t": time.time(),
-            "slug": window.slug,
-            "open": open_unix,
-            "question": window.question,
-            "condition_id": window.condition_id,
-            "up_token": window.up_token,
-            "down_token": window.down_token,
-            "raw_fee_schedule": raw.get("feeSchedule"),
-            "raw_crypto_config": raw.get("cryptoMarketConfig"),
-            "fee_type": raw.get("feeType"),
-            "min_size": window.min_size,
-            "tick": window.tick,
-            "lookback": window.lookback_seconds,
-            "version": window.version,
-            "neg_risk": window.neg_risk,
-            "skip_reasons": skip_reasons(window, clip=self.clip),
-            "reference_feed": self.feed.name,
-        })
+        if first or (known.price_to_beat is None and window.price_to_beat is not None):
+            md = raw.get("metadata") or {}
+            self.emit({
+                "type": "window", "t": time.time(), "slug": window.slug, "open": open_unix,
+                "title": window.title, "condition_id": window.condition_id,
+                "up_token": window.up_token, "down_token": window.down_token,
+                "K": window.price_to_beat, "fee_rate": window.fee_rate, "rebate_rate": window.rebate_rate,
+                "lookback": window.lookback_seconds, "reward_min_shares": window.reward_min_shares,
+                "raw_venue": raw.get("venue"), "raw_settings": raw.get("settings"),
+                "raw_stream": md.get("chainlinkDataStream"), "taker_delay_ms": md.get("takerDelayMs"),
+                "skip_reasons": skip_reasons(window),
+            })
         return window
 
+    # candles + basis --------------------------------------------------------
+    def refresh_candles(self, now: float, slug: str) -> None:
+        if now - self.candles_at < 60:
+            return
+        self.candles_at = now
+        try:
+            self.candles.update(fetch_candles(slug, int(now) - 66 * 60, int(now)))
+        except Exception as exc:  # noqa: BLE001
+            self.error("candles", exc, slug)
+            return
+        for t in [t for t in self.candles if t < now - 4 * 3600]:
+            del self.candles[t]
+        # Proxy basis: proxy price at the last second of each Chainlink bar vs the bar close.
+        for bar_open, bar in sorted(self.candles.items())[-5:]:
+            if bar_open in self.basis_done:
+                continue
+            proxy = self.spot.by_second.get(bar_open + 59)
+            if proxy is None:
+                continue
+            self.basis_done.add(bar_open)
+            self.emit({"type": "basis", "t": now, "minute": bar_open, "chainlink": bar["close"],
+                       "proxy": proxy, "basis_bps": bps(proxy, bar["close"])})
+
+    # one second -------------------------------------------------------------
     def tick(self, now: float) -> None:
         open_unix = window_start(now)
         end = open_unix + WINDOW_SECONDS
-        window = self.discover(open_unix)
+        window = self.windows.get(open_unix)
+        if window is None or (window.price_to_beat is None and int(now) % 5 == 0):
+            window = self.discover(open_unix, refresh=True)
         if end - now <= 30:
-            self.discover(end)  # next window, about 30 s before its open
+            self.discover(end)
+        self.spot.poll()
         if window is None:
             return
-        self.pending.setdefault(open_unix, end + 15)
+        self.refresh_candles(now, window.slug)
+        self.pending.setdefault(open_unix, end + 30)
 
-        if open_unix not in self.k:
-            self.k[open_unix] = self.feed.twap60_at(open_unix)  # the print on the bell, or None
-
-        books: dict[str, Book | None] = {}
-        for side, token in (("up", window.up_token), ("down", window.down_token)):
-            try:
-                books[side] = fetch_book(token)
-            except Exception as exc:  # noqa: BLE001
-                books[side] = None
-                self.emit({"type": "error", "t": now, "slug": window.slug, "where": f"book {side}", "error": repr(exc)})
+        try:
+            up_book: Book | None = fetch_book(window.slug)
+        except Exception as exc:  # noqa: BLE001
+            up_book = None
+            self.error("book", exc, window.slug)
         now = time.time()
         seconds_left = end - now
-        up, down = book_summary(books["up"], now), book_summary(books["down"], now)
+        up = book_summary(up_book, now)
+        down = book_summary(mirror(up_book) if up_book else None, now)
 
-        spot, k = self.feed.spot(), self.k[open_unix]
-        sigma = sigma_1m(self.feed.minute_spots())
+        spot = self.spot.spot(now)
+        k = window.price_to_beat
+        sigma = sigma_from_candles(self.candles, now)
+        skips = skip_reasons(window)
         p_up = None
-        skips = skip_reasons(window, clip=self.clip)
         if not skips and spot is not None and k is not None and sigma is not None:
             p_up = fair_up(
                 spot, k, sigma, seconds_left,
                 lookback_seconds=window.lookback_seconds,
-                final_minute_prices=self.feed.final_minute_prices(end, now) if seconds_left <= 60 else None,
+                final_minute_prices=self.spot.final_minute_prices(end, now) if seconds_left <= 60 else None,
             )
         edge = min_edge(datetime.fromtimestamp(now, tz=timezone.utc))
+        inf = float("inf")
         decision = decide(
             p_up,
             ask_up=up["ask"], ask_up_size=up["ask_size"],
             ask_down=down["ask"], ask_down_size=down["ask_size"],
-            fee_rate=window.fee_rate, min_edge=edge, clip=self.clip,
-            up_book_age_seconds=up["age"] if up["age"] is not None else float("inf"),
-            down_book_age_seconds=down["age"] if down["age"] is not None else float("inf"),
+            fee_rate=window.fee_rate if window.fee_rate is not None else 0.0,
+            min_edge=edge, clip=self.clip,
+            up_book_age_seconds=up["age"] if up["age"] is not None else inf,
+            down_book_age_seconds=down["age"] if down["age"] is not None else inf,
         )
         self.emit({
-            "type": "tick",
-            "t": round(now, 3),
-            "slug": window.slug,
-            "open": open_unix,
+            "type": "tick", "t": round(now, 3), "slug": window.slug, "open": open_unix,
             "seconds_left": round(seconds_left, 3),
             "S": spot, "K": k, "sigma_1m": sigma, "p_up": p_up,
-            "up": up, "down": down,
-            "min_edge": edge,
-            "fee_rate": window.fee_rate,
-            "skip_reasons": skips,
-            "reference_feed": self.feed.name,
+            "spot_sources": self.spot.sources,
+            "up": up, "down": down, "min_edge": edge, "fee_rate": window.fee_rate,
+            "skip_reasons": skips, "reference_feed": self.spot.name,
             "decision": asdict(decision),  # what decide() said; nothing is placed or filled
         })
+        self.spot.prune(now)
 
+    # resolution -------------------------------------------------------------
     def resolve_due(self, now: float) -> None:
         for open_unix, due in list(self.pending.items()):
             if now < due:
                 continue
-            slug = slug_for("btc", open_unix)
+            slug = slug_for(open_unix)
+            end = open_unix + WINDOW_SECONDS
             try:
-                got = fetch_window(slug, closed=True) or fetch_window(slug)
-            except Exception:  # noqa: BLE001
+                got = fetch_market(slug)
+            except Exception as exc:  # noqa: BLE001
+                self.error("resolution", exc, slug)
                 got = None
             official = official_outcome(got[0]) if got else None
             if official is None:
-                self.pending[open_unix] = now + 20
-                if now - open_unix > 3600:
+                self.pending[open_unix] = now + 30
+                if now - end > 3 * 3600:
                     self.emit({"type": "resolution", "t": now, "slug": slug, "open": open_unix,
-                               "official": None, "note": "not resolved after an hour"})
+                               "official": None, "note": "not resolved after 3 hours",
+                               "status": got[0].status if got else None})
                     del self.pending[open_unix]
                 continue
-            close = self.feed.twap60_at(open_unix + WINDOW_SECONDS)
-            k = self.k.get(open_unix)
-            local = None if close is None or k is None else ("up" if close >= k else "down")
+            w = got[0]
+            try:
+                bars = fetch_candles(slug, open_unix - 180, end + 120)
+            except Exception as exc:  # noqa: BLE001
+                self.error("resolution candles", exc, slug)
+                bars = {}
+            k_est, close_est = twap_estimate(bars, open_unix), twap_estimate(bars, end)
+            proxy_close = self.spot.rebuilt_twap(end)
+            local = None if w.close_twap is None or w.price_to_beat is None else local_call(w.close_twap, w.price_to_beat)
+            candle_call = None if k_est is None or close_est is None else local_call(close_est, k_est)
             self.emit({
                 "type": "resolution", "t": now, "slug": slug, "open": open_unix,
-                "K": k, "close_twap": close, "local_call": local, "official": official,
-                "reference_feed": self.feed.name,
+                "K": w.price_to_beat, "close_twap": w.close_twap, "official": official,
+                "venue_outcome": w.resolution_outcome,
+                "local_call": local,  # from the venue's own Chainlink open and close values
+                "candle_K": k_est, "candle_close": close_est, "candle_call": candle_call,
+                "candle_K_err_bps": bps(k_est, w.price_to_beat),
+                "candle_close_err_bps": bps(close_est, w.close_twap),
+                "candle_margin_bps": bps(close_est, k_est),
+                "proxy_close": proxy_close, "proxy_close_err_bps": bps(proxy_close, w.close_twap),
             })
             del self.pending[open_unix]
 
@@ -248,24 +260,21 @@ class Recorder:
         started = time.time()
         while seconds is None or time.time() - started < seconds:
             beat = time.time()
-            self.tick(beat)
-            self.resolve_due(time.time())
+            try:
+                self.tick(beat)
+                self.resolve_due(time.time())
+            except Exception as exc:  # noqa: BLE001 - one bad second must not stop the record
+                self.error("loop", exc)
             time.sleep(max(0.0, 1.0 - (time.time() - beat)))
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", type=Path, default=Path("logs/phase1.jsonl"))
-    ap.add_argument("--clip", type=float, required=True, help="config, must be >= orderMinSize")
+    ap.add_argument("--clip", type=float, required=True, help="shares per take; config")
     ap.add_argument("--seconds", type=float, default=None)
     args = ap.parse_args()
-    feed: ReferenceFeed = NullFeed()
-    from fivemin.polybolt import PolyBoltFeed, credentials_from_env
-
-    credentials = credentials_from_env()
-    if credentials is not None:
-        feed = PolyBoltFeed(credentials, raw_log=args.out.with_name(args.out.stem + ".polybolt.jsonl"))
-    Recorder(args.out, args.clip, feed).run(args.seconds)
+    Recorder(args.out, args.clip).run(args.seconds)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fivemin · BTC 5m paper desk</title>
+<title>fivemin · Limitless BTC 5m paper desk</title>
 <style>
 .viz-root {
   color-scheme: light;
@@ -93,7 +93,7 @@ button.theme { background: none; border: 1px solid var(--rule); color: var(--tex
 <div class="viz-root" id="root">
   <div class="banner" id="banner">SYNTHETIC LOG — not market data</div>
   <header>
-    <h1>BTC 5-minute · paper desk</h1>
+    <h1>Limitless BTC 5-minute · paper desk</h1>
     <span class="chip paper" title="No orders leave this machine"><b>PAPER</b> read-only</span>
     <span class="chip num" id="slug">—</span>
     <div class="clock">
@@ -123,8 +123,8 @@ button.theme { background: none; border: 1px solid var(--rule); color: var(--tex
     </section>
 
     <section class="card">
-      <h2>Books, as received</h2>
-      <div class="sub">Best price at the spread line. Outlined rows are decide()'s passive prices that could rest; a price that would cross is flagged, not rested. The two books mirror: an Up ask at x is a Down bid at 1 − x.</div>
+      <h2>Book, as received</h2>
+      <div class="sub">Best price at the spread line. Limitless publishes one book in the Up (YES) token; Down is its mirror (Down bid = 1 − Up ask). Outlined rows are decide()'s passive prices that could rest; a crossing price is flagged, not rested.</div>
       <div class="ladders">
         <div class="ladder" id="ladder-up"></div>
         <div class="ladder" id="ladder-down"></div>
@@ -158,7 +158,7 @@ button.theme { background: none; border: 1px solid var(--rule); color: var(--tex
 
   <section class="card" style="margin-top:14px">
     <h2>Windows</h2>
-    <div class="sub">Scored at 60 s after the open (240 s left). Local call is K vs the close TWAP; a tie is Up. Official is Polymarket's resolution.</div>
+    <div class="sub">Scored at 60 s after the open (240 s left). Local call is K vs the close TWAP; a tie is Up. Official is Limitless's resolution. Candle is our independent estimate from Chainlink spot bars (± bp margin); inside 1 bp it is not judged.</div>
     <div style="overflow-x:auto"><table class="win" id="windows"></table></div>
   </section>
 
@@ -199,10 +199,10 @@ function header(s) {
   const age = (a) => a === null || a === undefined ? '∞' : a.toFixed(2);
   const stale = (t.up.age ?? 9) > 1 || (t.down.age ?? 9) > 1;
   $('ages').innerHTML = `${stale ? '<span class="crit">⚠ stale</span>' : '<span class="ok">✓</span>'} books Up <b>${age(t.up.age)}s</b> Down <b>${age(t.down.age)}s</b>`;
-  const wired = t.S !== null && t.K !== null;
+  const wired = t.S !== null && t.K !== null && t.sigma_1m !== null;
   $('feed').innerHTML = wired
-    ? `<span class="ok">✓</span> Chainlink S <b class="num">${fmt(t.S, 2)}</b> K <b class="num">${fmt(t.K, 2)}</b> σ1m <b class="num">${fmt(t.sigma_1m * 1e4, 1)}bp</b>`
-    : `<span class="crit">✕</span> <b>${t.reference_feed || 'no reference'}</b> — no fair value`;
+    ? `<span class="ok">✓</span> K <b class="num">${fmt(t.K, 2)}</b> (Chainlink) · S <b class="num">${fmt(t.S, 2)}</b> (proxy) · σ1m <b class="num">${fmt(t.sigma_1m * 1e4, 1)}bp</b>`
+    : `<span class="crit">✕</span> no fair value — ${t.K === null ? 'K not captured yet' : t.S === null ? 'spot proxy stale' : 'σ not available (Chainlink candles)'}`;
   $('errs').innerHTML = s.error_count ? `<span class="crit">⚠ errors ${s.error_count}</span>` : 'errors 0';
 }
 
@@ -327,14 +327,18 @@ function gates(s) {
   const label = (st) => st === 'pass' ? '<span class="ok">pass</span>' : st === 'stop' ? '<span class="crit">STOP</span>' : '<span class="muted">pending</span>';
   const st = g.settlement, br = g.brier;
   $('gates').innerHTML =
-    `<div class="gate">${ico(st.status)}<span class="ttl">Settlement read matches Polymarket</span>${label(st.status)}
-      <span class="det num">${st.matched}/${g.target} matched · ${st.mismatched} mismatched · ${st.no_local_call} resolved without a local call (no Chainlink close)
+    `<div class="gate">${ico(st.status)}<span class="ttl">Settlement read matches Limitless</span>${label(st.status)}
+      <span class="det num">${st.matched}/${g.target} matched · ${st.mismatched} mismatched · ${st.no_local_call} without the venue's Chainlink values
       <div class="prog"><div style="width:${Math.min(100, st.matched / g.target * 100)}%"></div></div></span></div>` +
     `<div class="gate">${ico(br.status)}<span class="ttl">Brier(p_up) − Brier(mid) ≤ 0.02</span>${label(br.status)}
       <span class="det num">n=${br.n}/${g.target} · model ${fmt(br.model, 4)} · mid ${fmt(br.mid, 4)} · diff ${fmt(br.diff, 4)}</span></div>` +
     `<div class="gate">${ico(g.cap.status)}<span class="ttl">No p_up outside 5–95% with &gt;120 s left</span>${label(g.cap.status)}
       <span class="det num">${g.cap.count} violations</span></div>` +
-    `<div class="muted" style="font-size:11.5px;margin-top:6px">${g.resolved} windows resolved by Polymarket in this log.</div>`;
+    `<div class="gate">${ico(g.independent.status)}<span class="ttl">Independent Chainlink check agrees</span>${label(g.independent.status)}
+      <span class="det num">${g.independent.judged} judged · ${g.independent.disagree.length} disagree · ${g.independent.ambiguous} within 1 bp (not judged) · median candle error K ${fmt(g.independent.median_K_err_bps, 2)}bp, close ${fmt(g.independent.median_close_err_bps, 2)}bp</span></div>` +
+    `<div class="gate">${ico('pending')}<span class="ttl">Cost of the spot proxy (measured, not a gate)</span><span class="muted">info</span>
+      <span class="det num">close rebuilt from proxy: median error ${fmt(g.proxy.median_close_err_bps, 2)}bp · basis vs Chainlink: median ${fmt(g.proxy.basis_median_bps, 2)}bp, max |${fmt(g.proxy.basis_max_abs_bps, 2)}|bp over ${g.proxy.basis_n} minutes</span></div>` +
+    `<div class="muted" style="font-size:11.5px;margin-top:6px">${g.resolved} windows resolved by Limitless in this log.</div>`;
 }
 
 function paper(s) {
@@ -347,7 +351,7 @@ function paper(s) {
 }
 
 function windows(s) {
-  const head = '<tr><th>Open (UTC / ET)</th><th>Ticks</th><th>Skip</th><th>p@60s</th><th>mid@60s</th><th>K → close</th><th>Local</th><th>Official</th><th>Match</th><th>Reasons</th></tr>';
+  const head = '<tr><th>Open (UTC / ET)</th><th>Ticks</th><th>Skip</th><th>p@60s</th><th>mid@60s</th><th>K → close</th><th>Local</th><th>Candle</th><th>Official</th><th>Match</th><th>Proxy err</th><th>Reasons</th></tr>';
   const body = s.rows.map(r => {
     const match = r.local && r.official ? (r.local === r.official ? '<span class="ok">✓ match</span>' : '<span class="crit">✕ MISMATCH</span>') : '<span class="muted">—</span>';
     const tot = Object.values(r.reasons).reduce((a, b) => a + b, 0) || 1;
@@ -356,7 +360,7 @@ function windows(s) {
     return `<tr><td class="num">${utcTime(r.open)} / ${etTime(r.open)}</td><td class="num">${r.ticks}</td>` +
       `<td>${r.skip_reasons.length ? '<span class="crit">' + r.skip_reasons.join('; ') + '</span>' : '<span class="muted">none</span>'}</td>` +
       `<td class="num">${r.p_at_score === null ? '—' : fmt(r.p_at_score * 100, 1) + '%'}</td><td class="num">${cents(r.mid_at_score)}</td>` +
-      `<td class="num">${fmt(r.K, 2)} → ${fmt(r.close_twap, 2)}</td><td>${side(r.local)}</td><td>${side(r.official)}</td><td>${match}</td><td>${mix}</td></tr>`;
+      `<td class="num">${fmt(r.K, 2)} → ${fmt(r.close_twap, 2)}</td><td>${side(r.local)}</td><td>${side(r.candle_call)}${r.candle_margin_bps == null ? '' : ' <span class="muted num">' + fmt(r.candle_margin_bps, 1) + 'bp</span>'}</td><td>${side(r.official)}</td><td>${match}</td><td class="num">${r.proxy_close_err_bps == null ? '—' : fmt(r.proxy_close_err_bps, 2) + 'bp'}</td><td>${mix}</td></tr>`;
   }).join('');
   $('windows').innerHTML = head + body;
 }

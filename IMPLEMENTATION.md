@@ -1,123 +1,83 @@
-# BTC 5-minute paper platform
+# BTC 5-minute paper platform — Limitless
 
-This is the implementation plan for a paper-trading platform that follows the live Polymarket BTC 5-minute Up/Down market. It is a plan for a later engineer. It does not place orders, ask for a private key, or claim a profit target. There is no profit target. The read-only recorder and the local dashboard are already in the package. PolyBolt and the paper loop are what is not built. This document does not start a trading process.
+This is the implementation plan for a paper-trading platform that follows the live Limitless BTC 5-minute Up/Down market. It is a plan for a later engineer. It does not place orders, ask for a private key, or claim a profit target. There is no profit target. The read-only recorder and the dashboard are in the package and run on the VPS. The paper loop is what is not built. This document does not start a trading process.
 
-The venue is the international Polymarket CLOB documented at `docs.polymarket.com`. Polymarket US is a different venue. The terms forbid wash trading, spoofing, self-matching, layering, and evading the geo block. This plan does none of those. It does not copy a leaderboard wallet, chase a rebate tier, or treat an X profit screenshot or a closed-source bot as the specification.
+The venue is Limitless Exchange on Base (`api.limitless.exchange`, documented at `docs.limitless.exchange`). The plan moved here from Polymarket on 9 Nov 2026, because Polymarket's domains are under an Indian governmental blocking order (see the last section) and every machine this project runs on is in India. Nothing in this package contacts Polymarket. The Limitless terms make the user responsible for whether their use is lawful where they are; that question is open for any real-money phase and is not answered by the fact that the domain resolves. This plan does no wash trading, spoofing, self-matching or layering, does not route around any block, and does not treat a leaderboard wallet, an X screenshot or a closed-source bot as the specification.
 
 Paper capital is imaginary. Live capital stays out until the paper record in Phase 2 exists, and Phase 3 is a later goal.
 
-## Where the code already is
+## Where the code is
 
-The repository package is `fivemin` 0.1.0 (`src/fivemin/`). It requires Python 3.10+ (the suite passes on the VPS's 3.10.12). Two modules open the network, and neither signs an order. `recorder.py` calls `urllib.request.urlopen` for Gamma (`https://gamma-api.polymarket.com/events?slug=...`) and for the CLOB book (`https://clob.polymarket.com/book?token_id=...`). `dashboard.py` listens on `127.0.0.1` (default port 8765) and only reads the log. The package docstring still says live orders are not placed from this package. What is not built is the PolyBolt adapter and the paper loop. `recorder.main` passes `NullFeed`, so spot, the 60-second TWAP, and sigma stay empty and `fair_up` is not called. `paper.py` is the pure fill model. Nothing calls it on a live book yet. Tests live in `tests/` and are the specification of these functions. Later work calls them. It does not reimplement them and does not weaken the tests.
+The package is `fivemin` (`src/fivemin/`). It requires Python 3.10+ (the suite passes on the VPS's 3.10.12). Nothing in it signs an order. Tests in `tests/` are the specification of these functions; later work calls them, does not reimplement them, and does not weaken the tests. Raw venue payloads captured on 9 Nov 2026 are in `tests/fixtures/` and locked by `tests/test_live_payloads.py`.
 
 | Module | Role |
 | --- | --- |
-| `fivemin.market` | `window_start`, `slug_for`, `parse_event`. Window identity, Up and Down token ids, fee schedule, minimum size, tick, lookback, version. |
-| `fivemin.fees` | Taker fee curve. `fee_per_share`, `fee_usdc`, `taker_breakeven`, `buy_edge`, `pair_cost`. |
-| `fivemin.fair` | `fair_up` and `brier`. Returns `None` when the 60-second formula does not apply. |
-| `fivemin.session` | `min_edge(now)`. 3¢, or 5¢ on Saturday, Sunday, and 09:00–12:00 UTC. |
-| `fivemin.strategy` | `decide(...)`. Pure. One take candidate, passive prices, `split_ok`, and a log-only `pair_lock`. |
-| `fivemin.book` | `parse_book`. Sorts by price; the wire lists the best price last on both sides. |
-| `fivemin.paper` | `walk_asks`, `rest`, `RestingOrder.on_trade`, markouts, rebate line, `sleeve`. The fill model below, pure. Not wired to an engine yet. |
-| `fivemin.recorder` | Phase 1 recorder: Gamma discovery, CLOB book by REST poll, official outcome. `ReferenceFeed` is the PolyBolt seam; `NullFeed` records no fair value. |
-| `fivemin.polybolt` | Chainlink spot and 60 s TWAP from PolyBolt. Rejects non-Chainlink points, keys prints by source second, treats seq gaps as holes. |
-| `fivemin.report` | Reduces the log to the Phase 1 gates and the dashboard state. |
-| `fivemin.dashboard` | Read-only page over the log on 127.0.0.1. Every number is `report.state(log)`. |
+| `fivemin.market` | `slug_for`, `parse_market`, `skip_reasons`, `official_outcome`, `local_call`. Limitless market JSON to a `CryptoWindow`. |
+| `fivemin.book` | `parse_book` (6-decimal sizes, sorted by price), `mirror` (the Down book). |
+| `fivemin.fees` | Taker curve `fee_rate * p * (1 − p)` and the exact per-match `limitless_match_fee`. |
+| `fivemin.reference` | Chainlink 1-minute candles (σ and an independent TWAP estimate) and the Coinbase/Kraken spot proxy. |
+| `fivemin.fair` | `fair_up` and `brier`. `None` when the 60-second formula does not apply. |
+| `fivemin.session` | `min_edge(now)`. 3¢, or 5¢ on Saturday, Sunday and 09:00–12:00 UTC. |
+| `fivemin.strategy` | `decide(...)`. Pure. One take candidate, passive prices, `split_ok`, log-only `pair_lock`. |
+| `fivemin.paper` | Depth walk, queue model, markouts, rebate line. Not wired to an engine yet. |
+| `fivemin.recorder` | Phase 1 recorder. Read-only. |
+| `fivemin.report`, `fivemin.dashboard` | Gates and the read-only page, reduced from the append-only log. |
 
-Run the suite from the workspace root with the project virtualenv's pytest (`pyproject.toml` sets the path). The recorder is a one-second poll. The unbuilt PolyBolt adapter and the unbuilt paper loop sit in the same path:
+Run the suite with the project virtualenv's pytest from the workspace root. Deploy with `deploy/run.sh` (user-level, pid files, refuses a busy port, binds 127.0.0.1).
 
 ```
 window clock
-    -> Gamma discovery (slug, tokens, fees, lookback, version)
-    -> PolyBolt: Chainlink spot and 60-second TWAP
-    -> CLOB market websocket: both books
+    -> GET /markets/btc-up-or-down-5-min-{open}        (market, K, fee venue, lookback)
+    -> GET /markets/{slug}/orderbook                    (Up book; Down = mirror)
+    -> Chainlink candles (σ) + spot proxy (S)
     -> fair_up, min_edge, decide
     -> risk gate
     -> paper fills (no live execution in the first two phases)
-    -> merge leftovers, redeem from the official outcome
+    -> redeem from the official outcome
     -> append-only log
 ```
 
-The reference-price client is the official `polymarket-client` SDK, version 0.11 or newer. Do not use the archived `py-clob-client` or the deprecated `py-clob-client-v2`. Phase 1 must authenticate before it can read the settlement feed. Open `wss://ws-live-v2.polymarket.com/ws` and send `op: auth` with the CLOB API `apiKey`, `secret`, and `passphrase`. Wait for `op: authed`. Then subscribe to channel `price.crypto` with filter `{"symbol": "btcusd"}` and to channel `price.crypto.twap` with filter `{"symbol": "btcusd", "window_seconds": 60}`. A subscribe sent before that auth is rejected. Failed credentials close the socket with 4001, and the client does not reconnect until the credentials are fixed. Those three values are CLOB API credentials. They are not a private key, and they are not committed. They are read from a gitignored env file. This plan does not ask for them in chat, and it does not ask for a private key. Gamma discovery stays a public read. Phase 1 and Phase 2 still place no orders.
-
-Config, not code, for: clip size, the daily-loss dollar cap, the open-exposure cap, and the paper/live flag. The paper/live flag defaults to paper. The 3¢ and 5¢ residuals, the 95% cap, and the 120-second switch stay in `session.py` and `fair.py` so the tests keep owning them.
+Config, not code, for: clip size, the daily-loss dollar cap, the open-exposure cap, and the paper/live flag (default paper). The 3¢ and 5¢ residuals, the 95% cap and the 120-second switch stay in `session.py` and `fair.py` so the tests keep owning them.
 
 ## What is copied from the live venue
 
-The paper platform follows the live Polymarket environment. Every number below that is a market field is read from that market on that window. The 9 Nov 2026 observation is a check that the parser and the fee math still match a market we have already seen. It is not a default to write into the engine.
+Every market number is read from that market on that window. The 9 Nov 2026 values are a check that the parser still matches the venue, not defaults.
 
 ### Discovery
 
-A new window opens every 300 seconds. Window identity is the slug `btc-updown-5m-{unix_open}`. `unix_open` is the current Unix time floored to a multiple of 300, which is `window_start` in `fivemin.market`. `slug_for("btc", now)` builds the slug. The check locked by `tests/test_strategy.py` is the window that contains 2026-11-09 07:37:00 UTC: open `1794209700`, slug `btc-updown-5m-1794209700`, the market titled for 2:35–2:40 AM ET.
+A window opens every 300 seconds. The slug is `btc-up-or-down-5-min-{unix_open}` (`slug_for`). `GET /markets/{slug}` returns it; `startAt` is the open and `expirationTimestamp` (ms) the close. `skip_reasons` refuses a slug that is not this series, a slug whose number is not `startAt`, a window that is not 300 seconds, an oracle stream that is not `twap`, a TWAP window that is not 60 seconds, and a venue whose fee schedule is unknown. The market's metadata names Polymarket as an external parity source (`externalSlug`, `isPolyArbitrage`); this plan reads none of it.
 
-Discover through Gamma: `https://gamma-api.polymarket.com/events?slug={slug}`. Refresh the current slug and the next slug about 30 seconds before each open. `parse_event` reads the first market on the event.
+Outcomes are YES and NO token ids, not names. YES is Up: the resolved window of 08:50 UTC carried `chainlinkTwapResolution.outcome: "UP"` with `winningOutcomeIndex: 0` and `payoutNumerators [1, 0]`.
 
-Up and Down token ids come from `outcomes` and `clobTokenIds`. Those fields may be JSON strings. Match the token by outcome name, not by array index. A payload that lists Down first still binds the Up token to the Up outcome. The same parser reads `conditionId`, `negRisk`, and `version`.
+### Book
 
-Refuse any slug that is not `btc-updown-5m-*`. ETH, SOL, XRP, and 15-minute markets are out of this plan. If `cryptoMarketConfig.asset` or `duration` is present and is not BTC and the 5-minute duration, skip the window and record the raw values.
+`GET /markets/{slug}/orderbook` returns one book in the YES token. Sizes are raw 6-decimal units (1 share = 1,000,000); prices are decimals in thousandths. Down has no separate book: buying Down at q is selling Up at 1 − q, so `mirror` turns Up asks into Down bids and Up bids into Down asks. One request gives both sides at the same instant.
 
-### Books
+The venue's own `midpoint` is not used. On 9 Nov the book had no asks at all and the venue still printed `midpoint 0.7755`; `Book.mid()` is `None` for a one-sided book. A price that is not displayed is not a price we can trade. The mid is for the Brier comparison and markouts only.
 
-Subscribe to the CLOB market websocket documented for the international venue, one stream for the Up token and one for the Down token. Keep the full displayed depth, not the mid. Each side of the book carries a receipt timestamp. `decide` refuses a take when that age is greater than `FRESH_BOOK_SECONDS` (1.0 second).
+The book was thin on every window checked: often 100 shares a side at 10–15¢ apart, and once nothing on one side. Volume per window was a few dollars. Expect most windows to be skips and most paper quotes never to fill. `settings.minSize` (50 shares) is the minimum for LP rewards, not an order minimum; no order minimum and no tick are published. `decide` quotes on a 1¢ grid, which is valid on a thousandths book.
 
-The paper book is that displayed depth. That limit applies to fills: there is no fill at the mid, and there is no fill beyond displayed size. Posting a new level is allowed. A resting bid or ask from `decide` may sit at a price where displayed size is zero, and then `size_ahead` is 0. The mid is recorded for the Brier comparison and for markout. It is never a fill price.
+Maker orders, when a later phase sends them, are post-only. A paper quote that would cross the opposite touch is not rested (`paper.rest`). The venue publishes a taker delay (`takerDelayMs`, 250 on 9 Nov); log it, do not branch on it.
 
-Maker orders, when a later phase sends them, are post-only GTD. A paper bid or ask that would cross the opposite touch is not rested. Crossing is a take, and a take has to pass the take rule below. Cancel a resting quote when it is no longer the required residual through the model. The venue has a taker delay during which a live maker can cancel. Do not hardcode 150 ms or 250 ms, or any other delay constant. If the venue publishes the delay, log the published value. Do not branch on it.
+There is no public trade stream. The websocket (`wss://ws.limitless.exchange`, Socket.IO namespace `/markets`) carries the coalesced book only; trades are on a cached REST endpoint. The queue model needs trade prints, so Phase 2 has to read those events and accept that they lag.
 
-### Reference price
+### Reference prices
 
-The reference is the Chainlink BTC/USD stream on PolyBolt. Phase 1 authenticates with `op: auth`, then subscribes to `price.crypto` and `price.crypto.twap` for symbol `btcusd`, with `window_seconds` 60 on the TWAP filter, as specified above. Use `full_accuracy_value`. PolyBolt has no 30-second TWAP.
+`K` is `metadata.openPrice`: the Chainlink BTC/USD 60 s TWAP captured at the open (18-decimal precision). If it is missing, the window is not priced.
 
-RTDS price topics shut down at 30 Nov 2026 00:00 UTC. Do not build on RTDS.
+The settlement close is `metadata.chainlinkTwapResolution.close.raw / 1e18`. Up when close ≥ K. A tie is Up. Redeem from the official result (`status: RESOLVED`, `winningOutcomeIndex`); a 50-50 resolution pays $0.50 a share and is recorded as no outcome.
 
-The price to beat, `K`, is the Chainlink 60-second TWAP at the open of the window (the print on the bell). Spot from Binance, Coinbase, or any other exchange is not `K` and is not the settlement input. If the open TWAP print is missing, skip the window. Do not substitute a spot print.
+`sigma_1m` is the standard deviation of the last 60 one-minute log returns of Chainlink BTC/USD spot, from `GET /markets/{slug}/oracle-candles`. Those candles are spot, not TWAP: on 9 Nov the mean of the minute before each bell matched the official open and close TWAP to within $1–4 (under 0.5 bp), while the bar at the bell was $9–43 off. They publish about two minutes late; `sigma_from_candles` uses the newest 61 consecutive bars if they end within five minutes, and returns `None` on any missing minute.
 
-`S` in the fair-value call is the Chainlink spot. `sigma_1m` is the standard deviation of one-minute log returns of that same Chainlink spot over the trailing hour (60 completed returns). Fewer than 60 returns, a non-positive standard deviation, or a non-positive spot means there is no fair value.
+`S` is a proxy: the median of the Coinbase and Kraken BTC/USD mids, stale after 1.0 second. Live Chainlink spot needs credentials this project does not have, and Pyth's public endpoint now answers 401. This is a deviation from "S is the Chainlink spot", so its cost is measured every run: a `basis` record per minute (proxy vs the Chainlink bar close) and, per window, the error of the close TWAP rebuilt from proxy seconds against the official close. The final-minute formula uses one proxy price per completed second; a hole means `None`.
 
-### Settlement
+Inside the formula the lookback is 60 seconds and the variance offset 40 seconds. With more than 60 seconds left, `z = ln(S/K) / (sigma_1m * sqrt(max(seconds_left − 40, 1) / 60))` and `p_up = Φ(z)`. With 60 or fewer, the printed seconds are locked and only the unfinished average is random. Probability is capped to [5%, 95%] above 120 seconds left; a stored value outside that is a bug.
 
-Settlement is the Chainlink 60-second TWAP versus the price to beat. The close value is the 60-second TWAP at the end of the window. The local Up/Down call is Up when the close TWAP is greater than or equal to the price to beat, and Down otherwise. A tie resolves Up. That matches the resolution text on the checked market: Up if the Chainlink TWAP of the window is at or above the price at the beginning of the range. The source named on that market is `https://data.chain.link/streams/btc-usd-twap-60s-streams`.
+### Fees
 
-One Up share plus one Down share pays $1 at settlement. Redeem from the official Polymarket outcome. The local call is a check against that outcome. It does not override it.
+On new trading venues (`venue.feeModuleType == "COLLATERAL"`, `metadata.fee: true`) the taker pays `rate_bps × N × (S − N) / (10000 × S)` in USDC, N the USDC before fee and S the shares, rounded half-up to 0.00001 per match. With N = price × S this is `shares × rate × p × (1 − p)`, the same polynomial as `fees.fee_usdc`, with rate 0.05 at the standard 500 bps. Makers pay nothing. The docs' example — 100 shares at $0.40 cost $40 plus $1.20 — is a test.
 
-`twapLookbackSeconds` is read from the market (`cryptoMarketConfig.twapLookbackSeconds`). `parse_event` leaves a missing lookback as `None`. Pass that value into `fair_up` as `lookback_seconds`. Do not omit the argument: the function's default is 60, and a missing field must not become a silent 60. A lookback other than 60 seconds is skipped, not priced with the 60-second formula. `fair_up` returns `None` for any other lookback, and `decide` then returns no quotes and no take (`reason` is `no fair value`). Do not derive a 30-second variance in v1. Record the foreign lookback and move on.
-
-Inside the formula the lookback constant `LOOKBACK_SECONDS` is 60 and the variance offset is 40 seconds (`2 * 60 / 3`). With more than 60 seconds left:
-
-```
-horizon = max(seconds_left - 40, 1)
-z = ln(S / K) / (sigma_1m * sqrt(horizon / 60))
-p_up = Φ(z)
-```
-
-`Φ` is `normal_cdf` in `fair.py` (the error function, not a fitted approximation). With 60 seconds or fewer left, do not compare spot with `K`. Pass `final_minute_prices`: one Chainlink price per completed second of the averaging window, oldest first, a prefix with no holes and no forward-filled gaps. A hole means pass `None` and skip. The function then locks the printed sum. The future average of the remaining `r = 60 - len(printed)` seconds must be at least `(K * 60 - printed_sum) / r` for Up to win. The unfinished average has expectation `S` and standard deviation `(S * sigma_1m / sqrt(60)) * sqrt(r / 3)`. When `r` is 0, the probability is 1 if the average is at or above `K` and 0 otherwise, so a tie on the finished average is Up.
-
-Probability is capped at 95% when more than 120 seconds remain. The same clamp floors the other tail at 5%. Inside 120 seconds the cap is off and the probability may sit anywhere in `[0, 1]`. The recorder stores the capped value. A stored probability above 95% with more than 120 seconds left is a bug.
-
-### Fee fields
-
-Read `feeSchedule` on every window. The fields used are `rate`, `exponent`, `takerOnly`, and `rebateRate`. Also read `orderMinSize`, `orderPriceMinTickSize`, `version`, and `negRisk`.
-
-`CryptoWindow` stores rate, rebate rate, taker-only, minimum size, tick, lookback, version, and `fee_exponent`. `parse_event` sets `fee_exponent` from `feeSchedule.exponent`. A missing exponent stays `None`. `skip_reasons` refuses any value other than 1, so a missing exponent is a skip, the same as an exponent of 2. The window record logs the raw schedule as `raw_fee_schedule`. That copy is only a log. The skip uses the stored field. The coded curve in `fees.py` has no exponent argument. It is the exponent-1 polynomial. `skip_reasons` also skips when `takerOnly` is not true, because the maker rule below assumes makers pay zero, when the tick is not `0.01`, because `strategy.TICK` is `0.01` and `decide` does not take a tick argument, and when the configured clip is smaller than `orderMinSize`.
-
-The 9 Nov 2026 check, from the open market `btc-updown-5m-1794209700`, is a fixture to re-read, not a constant to substitute when a field is missing:
-
-| Field | Observed value |
-| --- | --- |
-| `feeSchedule.rate` | 0.07 |
-| `feeSchedule.exponent` | 1 |
-| `feeSchedule.takerOnly` | true |
-| `feeSchedule.rebateRate` | 0.2 |
-| `orderMinSize` | 5 |
-| `orderPriceMinTickSize` | 0.01 |
-| `cryptoMarketConfig` id | `btc-5m-twap-60` |
-| `twapLookbackSeconds` | 60 |
-| `version` | `v1` |
-| `negRisk` | false |
-
-`version` chooses the later inventory path. The observed market was `v1`, so a split, merge, or redeem goes through the CTF adapter, not the V2 router. A market with `version == "v2"` would use the router. Read `version` per market. Do not assume `v1` forever, and do not send a split until Phase 3 has done the $1 check on the version that market publishes.
-
-At the checked rate of 0.07, `fee_per_share(0.50, 0.07)` is 0.0175 USDC and `taker_breakeven(0.50, 0.07)` is 0.5175. A 62.1% model at a 55¢ ask clears a 3¢ residual. The same model at a 60¢ ask does not. Those three facts are tests. A different published rate uses the same functions with the rate that was read.
+At 0.05, `fee_per_share(0.50)` is 1.25¢ and the taker break-even at 50¢ is 51.25%. The maker rebate multiplier was 0.3 (`settings.rebateRate`). The rebate stays a separate line and never enters the judged result.
 
 ## Fill and queue model
 
@@ -140,7 +100,7 @@ One-second markout and settlement markout are logged on every paper fill.
 - One-second markout. One second after the fill, if both best bid and best ask exist and that book is at most one second old, the mid is their average. For a buy, markout is `mid − fill price`. For a maker sale, markout is `fill price − mid`. A missing mid is stored as null, counted in a missing column, and left out of the average.
 - Settlement markout. The official payout is 1 when our outcome won and 0 otherwise. A tie resolves Up, so an Up share pays 1 on a tie. Settlement markout for a buy is `payout − fill price − taker fee per share`. The maker fee per share is zero, so a maker buy is `payout − fill price`.
 
-The judged result is after fees and before rebates. Sum the settlement results. That sum is the only P&L the gates look at. Rebates are a separate line: for each maker fill, log `rebateRate × fee_per_share(fill price, feeRate) × shares` as an estimate of the maker rebate, using the `rebateRate` read from that market (0.2 on the 9 Nov check, which is 20% of the crypto taker fee). Do not add that line to the judged result. Do not add a leaderboard taker-rebate tier. A new account does not inherit one, and this plan does not raise size to chase one.
+The judged result is after fees and before rebates. Sum the settlement results. That sum is the only P&L the gates look at. Rebates are a separate line: for each maker fill, log `rebateRate × fee_per_share(fill price, feeRate) × shares` as an estimate of the maker rebate, using `settings.rebateRate` read from that market (0.3 on the 9 Nov check). Do not add that line to the judged result. Do not add a leaderboard taker-rebate tier. A new account does not inherit one, and this plan does not raise size to chase one.
 
 A paper book cannot fully reproduce queue position or the taker-delay race against other live orders. The queue model is an approximation. Someone can join ahead of a paper order, cancel ahead of it, or win the cancel race during the taker delay, and the public tape will not show that in a way this model can replay. Paper P&L is not a live fill. A cancel that would have lost the race on the live book is an adverse fill we will not see until Phase 3, which is why Phase 3 compares live markouts with paper markouts on the same windows and why takes stay off until a later paper stretch.
 
@@ -168,7 +128,7 @@ The risk gate runs before any paper fill and, later, before any live order. Hitt
 
 - Feed silence. If the PolyBolt socket or either book has no message for 1.0 second, cancel all quotes and trade nothing. The same 1.0 second is `FRESH_BOOK_SECONDS`. A stale Chainlink spot or a stale open TWAP means `fair_up` is not called. There is no last-known-price trade.
 - Daily loss. The operator sets a dollar cap in config before Phase 2. The process refuses to start the paper engine without that cap. This plan does not choose the number and does not treat it as a profit target. When the UTC day's judged P&L, after fees and before rebates, reaches minus that cap, cancel every order and refuse new decisions until a person restarts the process.
-- One clip per window. At most one taker clip, and resting size of at most one clip per side. The clip is config and must be at least the market's `orderMinSize` (5 on the 9 Nov check). No add, no martingale, no second clip after a fill or a miss.
+- One clip per window. At most one taker clip, and resting size of at most one clip per side. The clip is config. Limitless publishes no order minimum; `settings.minSize` (50) is only the rewards threshold. No add, no martingale, no second clip after a fill or a miss.
 - Open exposure. The operator sets a cap on the open paper cost (price times shares, plus taker fees already charged). An order that would exceed it is skipped.
 - Pre-rebate P&L. The figure that trips the daily loss, and the figure Phase 2 has to show, is the judged result: after fees and before rebates.
 
@@ -176,16 +136,19 @@ A dedicated trading wallet appears only in Phase 3. This plan does not ask for a
 
 ## Build phases
 
-The phased build starts from the existing pure fee, fair-value, and decision code. Record live windows until the local Up/Down call matches Polymarket. Then run the paper engine. Live capital stays out until that paper record exists.
+The phased build starts from the existing pure fee, fair-value, and decision code. Record live windows until the local Up/Down call matches Limitless's resolution. Then run the paper engine. Live capital stays out until that paper record exists.
 
 ### Phase 1 — read-only recorder
 
-`fivemin.recorder` already resolves the current and next `btc-updown-5m-{unix_open}` slug from Gamma, polls both CLOB books, and appends one JSON object per second plus a `window` record and a `resolution` record. Each `window` record includes the slug, both token ids, `raw_fee_schedule`, minimum size, tick, lookback, version, `negRisk`, and `skip_reasons`. Each tick includes `S`, `K`, `sigma_1m`, seconds left, `p_up`, both best bids and asks with sizes, book age, and the session edge. At resolution it records the close TWAP, the local Up/Down call, and the official outcome. With `NullFeed` those reference fields are null. Phase 1 still has to authenticate to PolyBolt with `op: auth`, then subscribe to `price.crypto` and `price.crypto.twap` for symbol `btcusd` with `window_seconds` 60, and stamp `K` from the TWAP tick on the bell. That adapter is not built. The paper loop is not built either.
+`fivemin.recorder` resolves the current and next slug, reads the Up book once a second (Down is the mirror), polls the spot proxy, refreshes Chainlink candles once a minute, and appends one JSON object per second plus `window`, `basis` and `resolution` records. Each tick has `S`, `K`, `sigma_1m`, seconds left, `p_up`, both best bids and asks with sizes, book age, the session edge, and what `decide` said. Each resolution has the venue's K and close, the official result, the local call, the candle estimates with their errors, and the proxy-rebuilt close with its error. It runs on the VPS under `deploy/run.sh`.
 
-Run at least 50 resolved windows. Two gates, both required:
+Run at least 50 resolved windows. Gates:
 
-1. The local Up/Down call from `K` versus the close TWAP matches Polymarket on every window. One mismatch stops the build. Fix the settlement read before any paper fill. A TWAP rebuilt from stored spot ticks may be logged beside the stream. It does not replace the stream in this gate.
-2. Score `p_up` with `brier` against the 0/1 outcome, next to the book mid at the same predeclared second (60 seconds after the open, once `K` exists and before the last-minute formula). Matching the mid is success. Beating the mid on 50 windows is not required and will not be claimed. Stop if `Brier(p_up) − Brier(mid)` is greater than 0.02. Also stop if any stored `p_up` with more than 120 seconds left is outside `[0.05, 0.95]`. If we lose to the mid by that margin, the formula or the vol estimate is wrong and no fill logic is written yet.
+1. The local Up/Down call from the venue's Chainlink `K` and close matches Limitless's official result on every window. One mismatch stops the build.
+2. The independent check: the TWAP estimated from Chainlink spot candles at each bell gives the same call wherever the margin is wider than 1 bp. One disagreement outside that band stops the build. Inside it the window is counted as ambiguous, not judged.
+3. Score `p_up` with `brier` against the outcome, next to the book mid at 60 seconds after the open. Stop if `Brier(p_up) − Brier(mid)` is greater than 0.02, or if any stored `p_up` with more than 120 seconds left is outside `[0.05, 0.95]`. On a book this thin the mid is often missing; windows without one are not scored.
+
+Also read, not gated: the proxy basis and the proxy-rebuilt close error. If they are large next to the edges `decide` acts on, the proxy is the problem and no fill logic is written yet.
 
 Phase 1 places nothing and simulates nothing.
 
@@ -208,9 +171,9 @@ This phase is specified so the later goal has a gate. It is not part of the work
 
 When it is started, from the same machine that will send orders:
 
-- Check `https://polymarket.com/api/geoblock`. If the machine is blocked, stop. Do not route around the block.
-- Use a dedicated wallet. Confirm one $1 split, one merge, and one redeem on the path that the market's `version` and `negRisk` select. The 9 Nov market was `v1`, which is the CTF adapter. Do not depend on inventory logic before that $1 round trip succeeds.
-- Then post-only quotes at the market minimum size (5 shares on the check), and run a tested daily-loss halt that cancels resting orders. Compare live one-second markouts with the paper markouts on the same windows.
+- Get a legal answer on real-money prediction markets for where the operator is. Without it, stop here. Do not route around any block.
+- Use a dedicated wallet on Base. Confirm one $1 buy, one redeem, and the venue's fee-module approval on the venue the market names (`venue.exchange`, `venue.feeModule`). Do not depend on inventory logic before that $1 round trip succeeds.
+- Then post-only quotes at the clip, and run a tested daily-loss halt that cancels resting orders. Compare live one-second markouts with the paper markouts on the same windows.
 - Takes stay off until paper takes, after fees and after failed cancels, are positive on a later stretch of days than the one used to inspect the rule.
 - The under-10¢ bid stays paper-only.
 
@@ -220,34 +183,25 @@ No ETH, SOL, XRP, or 15-minute market. They share the BTC move, so they are one 
 
 ## What the leaderboard does not specify
 
-The 9 Nov 2026 census is a constraint on the gates, not a strategy to copy. Always-on bots are the book: a few percent of wallets post most of the maker size. As a group their trading P&L was a loss, and rebates made the group slightly positive. The wallets that finished up were mostly makers and mostly active on both outcomes. Both-sides is allowed here only as the passive complete set whose bids sum to 99¢ or less. A paired cost above $1 is how a two-sided quote bleeds. Copying a leaderboard wallet one or two minutes later makes you the taker who pays the fee. The late directional load on the SLIP-ME tape is one wallet, not a rule, and the pre-registered test of that idea lost money. Hold to redeem. Do not chase a rebate tier. The largest losses in the census were large.
+The census below was taken on Polymarket's BTC 5-minute tape on 9 Nov 2026, before the move. Limitless's book is far thinner, so treat it as a description of who sits on these books, not as numbers to reuse. It is a constraint on the gates, not a strategy to copy. Always-on bots are the book: a few percent of wallets post most of the maker size. As a group their trading P&L was a loss, and rebates made the group slightly positive. The wallets that finished up were mostly makers and mostly active on both outcomes. Both-sides is allowed here only as the passive complete set whose bids sum to 99¢ or less. A paired cost above $1 is how a two-sided quote bleeds. Copying a leaderboard wallet one or two minutes later makes you the taker who pays the fee. The late directional load on the SLIP-ME tape is one wallet, not a rule, and the pre-registered test of that idea lost money. Hold to redeem. Do not chase a rebate tier. The largest losses in the census were large.
 
 ## Limits of this plan
 
 The queue model is an approximation. A paper book cannot fully reproduce queue position or the taker-delay race against other live orders. Paper P&L is not a live fill.
 
-`decide` does not enforce one clip per window, does not drop a take under 10¢, and does not halt on a silent feed. The engine does. `fair_up` prices only a 60-second lookback. Anything else is a skip. Fee rate, lookback, tick, minimum size, exponent, and version are read per market. The 9 Nov 2026 values are the check.
+`decide` does not enforce one clip per window, does not drop a take under 10¢, and does not halt on a silent feed. The engine does. `fair_up` prices only a 60-second lookback. Anything else is a skip. Fee venue, lookback and stream type are read per market. The 9 Nov 2026 values are the check. `S` is a measured proxy, not Chainlink.
 
-Success is the Phase 1 match to Polymarket, a `p_up` that is not a wide miss of the book mid, and a Phase 2 log whose judged result is after fees and before rebates and whose maker markout is inside the 3¢ cushion. There is no profit target. This document is the plan only.
+Success is the Phase 1 match to Limitless's resolution, a `p_up` that is not a wide miss of the book mid, and a Phase 2 log whose judged result is after fees and before rebates and whose maker markout is inside the 3¢ cushion. There is no profit target. This document is the plan only.
 
 ## Findings from the raw payloads (9 Nov 2026)
 
-Checked against live Gamma and CLOB responses, saved under `tests/fixtures/` and locked by `tests/test_live_payloads.py`:
+- Limitless resolves this series from the same Chainlink BTC/USD 60 s TWAP stream as the plan's original venue and records both ends in `chainlinkTwapResolution` (open and close raw values, feed id, `offsetSeconds`). The resolved 08:50 window: K 74263.908, close 74422.150, Up.
+- `GET /markets/{slug}/oracle-candles` is public and returns Chainlink BTC/USD spot in 1-minute bars, about two minutes late.
+- One book, YES token, 6-decimal sizes. The venue's `midpoint` is printed even for a one-sided book.
+- The new-venue taker fee is exactly the plan's polynomial with rate 0.05.
+- Thin book: 100-share levels 10–15¢ apart, a few dollars of volume per window.
+- PolyBolt (Chainlink spot) needs CLOB credentials; Pyth Hermes answers 401. Coinbase and Kraken are public and reachable from the VPS, hence the proxy.
 
-- The `/book` payload lists bids ascending and asks descending. The best price is the last element on both sides. `parse_book` sorts; nothing indexes the raw lists.
-- Gamma carries `eventStartTime`, which must equal the slug's open. `skip_reasons` checks it.
-- A resolved window carries `closed: true`, `umaResolutionStatus: "resolved"` and `outcomePrices` of `["0","1"]` or `["1","0"]`, matched by outcome name. That is `official_outcome`. A closed window is only returned by Gamma with `&closed=true`.
-- The Up and Down books mirror (Up ask x is Down bid 1 − x). Two REST snapshots taken about 0.3 s apart summed to 0.99–1.02 in about one tick in five, so a REST pair is not a consistent pair. `pair_lock` and any two-book logic need the websocket, not the poll.
-- `decide()` can emit a passive bid at or above the best ask. The engine must pass every passive price through `paper.rest`, which refuses a crossing quote.
-- `parse_event` previously defaulted a missing `takerOnly` to true, a missing tick to 0.01 and a missing `orderMinSize` to 0. Those are now `None` and skip the window.
+## Why the venue changed (9 Nov 2026)
 
-- PolyBolt's reference-price channels require CLOB API credentials (`{"op":"auth"}` with apiKey, secret, passphrase). An unauthenticated subscribe to `price.crypto` and `price.crypto.twap` answered `auth_required` on 9 Nov 2026. "Phase 1 and Phase 2 can read the public market and book feeds without a wallet" holds for Gamma and the CLOB book, not for `K` and `S`. Deriving CLOB API credentials needs a wallet signature, so the operator does that once, outside this code, and sets `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_API_PASSPHRASE`. Read-only credentials on an unfunded wallet are enough; nothing here places an order.
-- Every PolyBolt point carries `source` (`chainlink`, `pyth`, `binance`). The `provider` pin may be ignored by the server, and the docs' own example snapshot is `pyth`. `fivemin.polybolt` rejects any point that is not `chainlink` and counts it.
-
-Without those credentials the recorder runs `NullFeed`. Then every tick records `no fair value`, `local_call` is null, and gate 1 counts the window as resolved without a local call, never as a match.
-
-## Indian blocking order (checked 9 Nov 2026)
-
-`polymarket.com` and its API hosts are under a governmental blocking order for India. Google Public DNS answers `REFUSED` with Extended DNS Error 16 (Censored): "subject to a judicial injunction or other governmental blocking order for IN", Lumen notice 41503850. The same answer comes back from an Indian VPS (AS152565) and from an Indian home connection. Some Indian resolvers do not enforce it yet, which is the only reason any Indian machine reaches the venue.
-
-Polymarket's own geoblock endpoint returned `blocked: false` for an Indian IP that day. That endpoint reflects Polymarket's restrictions, not Indian law. Do not change a resolver, add a hosts entry, use a VPN, or rent an offshore server to get around the order. Phase 3 (real money) from India needs a legal answer first, not a technical one.
+`polymarket.com` and its API hosts are under a governmental blocking order for India. Google Public DNS answers `REFUSED` with Extended DNS Error 16 (Censored): "subject to a judicial injunction or other governmental blocking order for IN", Lumen notice 41503850, from an Indian VPS (AS152565) and from an Indian home connection. No resolver change, hosts entry, VPN or offshore server was used to get around it, and none should be. Limitless and every source above resolve normally from the same VPS through the same resolver. That is a statement about DNS on that day, not a legal opinion about Limitless; Phase 3 needs that opinion first.

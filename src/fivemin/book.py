@@ -1,9 +1,12 @@
-"""Order book as the CLOB publishes it. No I/O.
+"""Order book as Limitless publishes it. No I/O.
 
-The raw `/book` payload and the websocket `book` event list bids ascending and
-asks descending, so the best price is the *last* element on both sides (seen
-on btc-updown-5m-1794211200, 9 Nov 2026). Never index `[0]` on the raw lists:
-this module sorts by price and does not trust the wire order.
+`GET /markets/{slug}/orderbook` returns one book, quoted in the YES (Up) token.
+`size` is in raw 6-decimal units (1 share = 1,000,000); `price` is a plain
+decimal. The docs say bids come highest first and asks lowest first; this
+module sorts by price anyway and never trusts the wire order.
+
+Down has no separate book: buying Down at q is selling Up at 1 - q, so the
+Down book is the mirror of the Up book (`mirror`).
 """
 
 from __future__ import annotations
@@ -56,18 +59,29 @@ class Book:
         levels.sort(key=lambda lv: lv[0], reverse=(side == "bid"))
 
 
-def _levels(raw: list[dict[str, Any]] | None) -> list[Level]:
+SIZE_SCALE = 1_000_000
+
+
+def _levels(raw: list[dict[str, Any]] | None, scale: float) -> list[Level]:
     out = []
     for row in raw or []:
-        price, size = float(row["price"]), float(row["size"])
+        price, size = float(row["price"]), float(row["size"]) / scale
         if size > 0:
             out.append((price, size))
     return out
 
 
-def parse_book(raw: dict[str, Any], *, received: float | None = None) -> Book:
-    bids = sorted(_levels(raw.get("bids")), key=lambda lv: lv[0], reverse=True)
-    asks = sorted(_levels(raw.get("asks")), key=lambda lv: lv[0])
-    ts = raw.get("timestamp")
-    timestamp = None if ts in (None, "") else float(ts) / 1000.0
-    return Book(bids=bids, asks=asks, timestamp=timestamp, received=received)
+def parse_book(raw: dict[str, Any], *, received: float | None = None, scale: float = SIZE_SCALE) -> Book:
+    bids = sorted(_levels(raw.get("bids"), scale), key=lambda lv: lv[0], reverse=True)
+    asks = sorted(_levels(raw.get("asks"), scale), key=lambda lv: lv[0])
+    return Book(bids=bids, asks=asks, timestamp=None, received=received)
+
+
+def mirror(book: Book) -> Book:
+    """The other outcome's book: its bids are 1 - our asks, its asks 1 - our bids."""
+    return Book(
+        bids=[(round(1.0 - p, 6), s) for p, s in book.asks],
+        asks=[(round(1.0 - p, 6), s) for p, s in book.bids],
+        timestamp=book.timestamp,
+        received=book.received,
+    )

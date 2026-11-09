@@ -1,42 +1,42 @@
-"""Gamma event parsing for a 5-minute crypto Up/Down market.
+"""Limitless BTC 5-minute Up/Down market, as `GET /markets/{slug}` returns it.
 
-Token ids are matched by outcome name. The fee rate and the TWAP lookback
-come off the market object. A missing field is left as None, never replaced by
-the 9 Nov 2026 value, and `skip_reasons` then refuses the window.
+Read on 9 Nov 2026 from https://api.limitless.exchange (docs.limitless.exchange):
+
+  * slug `btc-up-or-down-5-min-{unix_open}`; `startAt` is the open,
+    `expirationTimestamp` (ms) the close.
+  * `tokens.yes` is Up and `tokens.no` is Down: a resolved window carried
+    `chainlinkTwapResolution.outcome: "UP"` with `winningOutcomeIndex: 0`.
+  * Settlement is the Chainlink BTC/USD 60 s TWAP
+    (`metadata.chainlinkDataStream.streamType: "twap"`, `twapWindowSeconds: 60`).
+    `metadata.openPrice` is the price to beat; `chainlinkTwapResolution.close.raw`
+    (18 decimals) is the close. Up when close >= open.
+  * Taker fee on new venues (`venue.feeModuleType == "COLLATERAL"`, `metadata.fee`):
+    rate_bps * N * (S - N) / (10000 * S), standard rate 500 bps. Makers pay zero.
+  * `settings.minSize` is the LP-rewards minimum, not an order minimum. No tick
+    is published; book prices come in thousandths, so a 1-cent grid is valid.
+
+A missing field is None and `skip_reasons` refuses the window.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 WINDOW_SECONDS = 300
-SLUG_PREFIX = "btc-updown-5m-"
-REQUIRED_TICK = 0.01  # strategy.TICK; decide() takes no tick argument
+SLUG_PREFIX = "btc-up-or-down-5-min-"
 REQUIRED_LOOKBACK = 60  # fair.LOOKBACK_SECONDS
-FIVE_MINUTE_DURATIONS = {"5m", "5min", "300", "300s"}
+STANDARD_FEE_BPS = 500  # docs: "The standard rate is 5% (500 bps)"
 
 
 def window_start(unix_seconds: float) -> int:
     return int(unix_seconds) // WINDOW_SECONDS * WINDOW_SECONDS
 
 
-def slug_for(asset: str, unix_seconds: float) -> str:
-    return f"{asset}-updown-5m-{window_start(unix_seconds)}"
-
-
-def _loads(value: Any) -> Any:
-    if isinstance(value, str):
-        return json.loads(value)
-    return value
-
-
-def _float_or_none(value: Any) -> float | None:
-    if value is None or value == "":
-        return None
-    return float(value)
+def slug_for(unix_seconds: float) -> str:
+    return f"{SLUG_PREFIX}{window_start(unix_seconds)}"
 
 
 def _unix(iso: Any) -> int | None:
@@ -45,128 +45,99 @@ def _unix(iso: Any) -> int | None:
     return int(datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp())
 
 
+def _price(value: Any, *, raw18: bool = False) -> float | None:
+    if value in (None, ""):
+        return None
+    d = Decimal(str(value))
+    return float(d / Decimal(10) ** 18) if raw18 else float(d)
+
+
 @dataclass(frozen=True)
 class CryptoWindow:
     slug: str
     condition_id: str
-    question: str
-    version: str | None
-    neg_risk: bool
     up_token: str
     down_token: str
-    fee_rate: float
-    rebate_rate: float
-    taker_only: bool | None
+    open_unix: int | None
+    end_unix: int | None
+    fee_rate: float | None  # per-share curve coefficient, 0.05 at 500 bps
+    rebate_rate: float | None
     lookback_seconds: int | None
-    min_size: float | None
-    tick: float | None
-    asset: str | None
-    duration: str | None
-    fee_exponent: float | None = None
-    open_unix: int | None = None
-    end_unix: int | None = None
-    closed: bool = False
-    resolution_status: str | None = None
-    up_price: float | None = None
-    down_price: float | None = None
+    stream_type: str | None
+    reward_min_shares: float | None
+    price_to_beat: float | None  # metadata.openPrice, Chainlink TWAP at the open
+    status: str | None
+    winning_index: int | None
+    close_twap: float | None  # chainlinkTwapResolution.close.raw / 1e18
+    resolution_outcome: str | None  # "UP" / "DOWN" as the venue wrote it
+    title: str = ""
 
 
-def parse_event(event: dict[str, Any]) -> CryptoWindow:
-    markets = event.get("markets") or []
-    if not markets:
-        raise ValueError("event has no markets")
-    market = markets[0]
-    outcomes = [str(name) for name in _loads(market["outcomes"])]
-    token_ids = [str(token) for token in _loads(market["clobTokenIds"])]
-    if len(outcomes) != len(token_ids):
-        raise ValueError("outcomes and clobTokenIds differ in length")
-    by_name = {name.lower(): token for name, token in zip(outcomes, token_ids)}
-    if "up" not in by_name or "down" not in by_name:
-        raise ValueError(f"expected Up and Down outcomes, got {outcomes}")
+def parse_market(m: dict[str, Any]) -> CryptoWindow:
+    tokens = m.get("tokens") or {}
+    if not tokens.get("yes") or not tokens.get("no"):
+        raise ValueError("market has no yes/no tokens")
+    md = m.get("metadata") or {}
+    stream = md.get("chainlinkDataStream") or {}
+    venue = m.get("venue") or {}
+    settings = m.get("settings") or {}
+    res = md.get("chainlinkTwapResolution") or {}
 
-    prices_raw = market.get("outcomePrices")
-    prices: dict[str, float] = {}
-    if prices_raw is not None:
-        values = [float(p) for p in _loads(prices_raw)]
-        if len(values) == len(outcomes):
-            prices = {name.lower(): value for name, value in zip(outcomes, values)}
-
-    fee = market.get("feeSchedule") or {}
-    if "rate" not in fee:
-        raise ValueError("feeSchedule.rate is missing")
-    config = market.get("cryptoMarketConfig") or {}
-    lookback = config.get("twapLookbackSeconds")
-    taker_only = fee.get("takerOnly")
+    fee_rate = None
+    if md.get("fee") is False:
+        fee_rate = 0.0
+    elif md.get("fee") is True and venue.get("feeModuleType") == "COLLATERAL":
+        fee_rate = STANDARD_FEE_BPS / 10_000
+    reward_min = settings.get("minSize", md.get("minSize"))
+    exp = m.get("expirationTimestamp")
     return CryptoWindow(
-        slug=str(market.get("slug") or event.get("slug") or ""),
-        condition_id=str(market["conditionId"]),
-        question=str(market.get("question") or ""),
-        version=None if market.get("version") is None else str(market.get("version")),
-        neg_risk=bool(market.get("negRisk")),
-        up_token=by_name["up"],
-        down_token=by_name["down"],
-        fee_rate=float(fee["rate"]),
-        rebate_rate=float(fee.get("rebateRate") or 0.0),
-        taker_only=None if taker_only is None else bool(taker_only),
-        lookback_seconds=None if lookback is None else int(lookback),
-        min_size=_float_or_none(market.get("orderMinSize")),
-        tick=_float_or_none(market.get("orderPriceMinTickSize")),
-        asset=None if config.get("asset") is None else str(config.get("asset")),
-        duration=None if config.get("duration") is None else str(config.get("duration")),
-        fee_exponent=_float_or_none(fee.get("exponent")),
-        open_unix=_unix(market.get("eventStartTime") or event.get("startTime")),
-        end_unix=_unix(market.get("endDate")),
-        closed=bool(market.get("closed")),
-        resolution_status=market.get("umaResolutionStatus"),
-        up_price=prices.get("up"),
-        down_price=prices.get("down"),
+        slug=str(m.get("slug") or ""),
+        condition_id=str(m.get("conditionId") or ""),
+        up_token=str(tokens["yes"]),
+        down_token=str(tokens["no"]),
+        open_unix=_unix(m.get("startAt")),
+        end_unix=None if exp is None else int(exp) // 1000,
+        fee_rate=fee_rate,
+        rebate_rate=None if settings.get("rebateRate") is None else float(settings["rebateRate"]),
+        lookback_seconds=None if stream.get("twapWindowSeconds") is None else int(stream["twapWindowSeconds"]),
+        stream_type=stream.get("streamType"),
+        reward_min_shares=None if reward_min is None else float(reward_min) / 1e6,
+        price_to_beat=_price(md.get("openPrice")),
+        status=m.get("status"),
+        winning_index=m.get("winningOutcomeIndex"),
+        close_twap=_price((res.get("close") or {}).get("raw"), raw18=True),
+        resolution_outcome=res.get("outcome"),
+        title=str(m.get("title") or ""),
     )
 
 
-def skip_reasons(window: CryptoWindow, *, clip: float) -> list[str]:
-    """Every reason the plan gives to skip this window. Empty means tradeable.
-
-    Nothing here substitutes the 9 Nov 2026 value for a missing field.
-    """
+def skip_reasons(window: CryptoWindow) -> list[str]:
+    """Every reason to skip this window. Empty means it can be priced."""
     reasons: list[str] = []
     if not window.slug.startswith(SLUG_PREFIX):
         reasons.append(f"slug {window.slug!r} is not {SLUG_PREFIX}*")
     else:
-        slug_open = window.slug[len(SLUG_PREFIX):]
-        if not slug_open.isdigit() or int(slug_open) % WINDOW_SECONDS:
-            reasons.append(f"slug open {slug_open!r} is not a 300-second boundary")
-        elif window.open_unix is not None and int(slug_open) != window.open_unix:
-            reasons.append(f"slug open {slug_open} != eventStartTime {window.open_unix}")
-    if window.asset is not None and window.asset.lower() != "btc":
-        reasons.append(f"asset {window.asset!r}")
-    if window.duration is not None and window.duration.lower() not in FIVE_MINUTE_DURATIONS:
-        reasons.append(f"duration {window.duration!r}")
-    if window.fee_exponent != 1:
-        reasons.append(f"fee exponent {window.fee_exponent!r} is not 1")
-    if window.taker_only is not True:
-        reasons.append(f"takerOnly {window.taker_only!r} is not true")
-    if window.tick is None or abs(window.tick - REQUIRED_TICK) > 1e-12:
-        reasons.append(f"tick {window.tick!r} is not 0.01")
+        tail = window.slug[len(SLUG_PREFIX):]
+        if not tail.isdigit() or int(tail) % WINDOW_SECONDS:
+            reasons.append(f"slug open {tail!r} is not a 300-second boundary")
+        elif window.open_unix is not None and int(tail) != window.open_unix:
+            reasons.append(f"slug open {tail} != startAt {window.open_unix}")
+    if window.open_unix is not None and window.end_unix is not None and window.end_unix - window.open_unix != WINDOW_SECONDS:
+        reasons.append(f"window length {window.end_unix - window.open_unix} s")
+    if window.stream_type != "twap":
+        reasons.append(f"oracle stream {window.stream_type!r} is not twap")
     if window.lookback_seconds != REQUIRED_LOOKBACK:
         reasons.append(f"lookback {window.lookback_seconds!r} is not 60")
-    if window.min_size is None:
-        reasons.append("orderMinSize missing")
-    elif clip < window.min_size:
-        reasons.append(f"clip {clip} < orderMinSize {window.min_size}")
-    if window.fee_rate < 0:
-        reasons.append(f"fee rate {window.fee_rate} < 0")
+    if window.fee_rate is None:
+        reasons.append("fee schedule unknown (not a COLLATERAL venue)")
     return reasons
 
 
 def official_outcome(window: CryptoWindow) -> str | None:
-    """'up' or 'down' once Polymarket has resolved the market, else None."""
-    if not window.closed or window.resolution_status != "resolved":
+    """'up' / 'down' once Limitless has resolved, else None (50-50 is None too)."""
+    if window.status != "RESOLVED":
         return None
-    if window.up_price == 1.0 and window.down_price == 0.0:
-        return "up"
-    if window.up_price == 0.0 and window.down_price == 1.0:
-        return "down"
-    return None
+    return {0: "up", 1: "down"}.get(window.winning_index)
 
 
 def local_call(close_twap: float, price_to_beat: float) -> str:

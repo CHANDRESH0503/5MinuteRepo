@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fivemin.market import parse_event, slug_for, window_start
+from fivemin.market import slug_for, window_start
 from fivemin.session import min_edge
 from fivemin.strategy import decide
 
@@ -88,37 +88,4 @@ def test_slug_is_the_window_open():
     # 2026-11-09 07:37:00 UTC is inside the 07:35 window.
     unix = datetime(2026, 11, 9, 7, 37, tzinfo=timezone.utc).timestamp()
     assert window_start(unix) == 1794209700
-    assert slug_for("btc", unix) == "btc-updown-5m-1794209700"
-
-
-def test_gamma_payload_is_read_from_the_market_object():
-    event = {
-        "slug": "btc-updown-5m-1794209700",
-        "markets": [
-            {
-                "slug": "btc-updown-5m-1794209700",
-                "question": "Bitcoin Up or Down",
-                "conditionId": "0xabc",
-                "outcomes": '["Down", "Up"]',
-                "clobTokenIds": '["down-token", "up-token"]',
-                "feeSchedule": {"rate": 0.07, "takerOnly": True, "rebateRate": 0.2},
-                "cryptoMarketConfig": {
-                    "asset": "btc",
-                    "duration": "5m",
-                    "twapLookbackSeconds": 60,
-                },
-                "orderMinSize": 5,
-                "orderPriceMinTickSize": 0.01,
-                "negRisk": False,
-                "version": "v1",
-            }
-        ],
-    }
-    market = parse_event(event)
-    assert market.up_token == "up-token"
-    assert market.down_token == "down-token"
-    assert market.fee_rate == 0.07
-    assert market.rebate_rate == 0.2
-    assert market.lookback_seconds == 60
-    assert market.version == "v1"
-    assert market.min_size == 5
+    assert slug_for(unix) == "btc-up-or-down-5-min-1794209700"

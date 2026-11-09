@@ -20,6 +20,7 @@ GATE_WINDOWS = 50
 BRIER_STOP = 0.02
 SCORE_SECONDS_LEFT = 240.0  # 60 s after the open: K exists, before the last minute
 CAP_SECONDS = 120.0
+AMBIGUOUS_BPS = 1.0  # candle TWAP estimates were within 0.5 bp on 9 Nov; inside 1 bp a call is not judged
 
 
 def load(path: Path) -> list[dict[str, Any]]:
@@ -66,6 +67,15 @@ def phase1(records: list[dict]) -> dict[str, Any]:
             model_pairs.append((tick["p_up"], y))
             mid_pairs.append((tick["up"]["mid"], y))
 
+    def med_abs(key: str) -> float | None:
+        vals = sorted(abs(r[key]) for r in resolutions if r.get(key) is not None)
+        return None if not vals else vals[len(vals) // 2]
+
+    judged = [r for r in resolutions if r.get("candle_call") and r.get("candle_margin_bps") is not None
+              and abs(r["candle_margin_bps"]) > AMBIGUOUS_BPS]
+    candle_disagree = [r["slug"] for r in judged if r["candle_call"] != r["official"]]
+    basis = [r["basis_bps"] for r in records if r.get("type") == "basis" and r.get("basis_bps") is not None]
+
     cap_violations = [
         {"slug": t["slug"], "seconds_left": t["seconds_left"], "p_up": t["p_up"]}
         for ts in ticks_by_open.values() for t in ts
@@ -90,6 +100,20 @@ def phase1(records: list[dict]) -> dict[str, Any]:
         },
         "cap": {"violations": cap_violations[:20], "count": len(cap_violations),
                 "status": "stop" if cap_violations else "pass"},
+        "independent": {
+            "judged": len(judged), "disagree": candle_disagree,
+            "ambiguous": sum(1 for r in resolutions if r.get("candle_margin_bps") is not None
+                             and abs(r["candle_margin_bps"]) <= AMBIGUOUS_BPS),
+            "median_K_err_bps": med_abs("candle_K_err_bps"),
+            "median_close_err_bps": med_abs("candle_close_err_bps"),
+            "status": "stop" if candle_disagree else ("pass" if len(judged) >= GATE_WINDOWS else "pending"),
+        },
+        "proxy": {
+            "median_close_err_bps": med_abs("proxy_close_err_bps"),
+            "basis_n": len(basis),
+            "basis_median_bps": None if not basis else sorted(basis)[len(basis) // 2],
+            "basis_max_abs_bps": None if not basis else max(abs(b) for b in basis),
+        },
         "target": GATE_WINDOWS,
     }
 
@@ -131,6 +155,8 @@ def state(records: list[dict]) -> dict[str, Any]:
             "p_at_score": score.get("p_up") if score else None,
             "mid_at_score": score["up"].get("mid") if score else None,
             "takes": sum(1 for t in ts if (t.get("decision") or {}).get("take_side")),
+            "candle_call": res.get("candle_call"), "candle_margin_bps": res.get("candle_margin_bps"),
+            "proxy_close_err_bps": res.get("proxy_close_err_bps"),
             "reasons": dict(reasons),
         })
 

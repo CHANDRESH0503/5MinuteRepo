@@ -5,15 +5,15 @@
 #
 #   PORT=8765 CLIP=5 deploy/run.sh          start / restart
 #   deploy/run.sh stop                      stop only our two processes
-#   NO_RECORDER=1 HOST=127.0.0.1 deploy/run.sh
-#       dashboard only, private; the log arrives from deploy/sync.sh (used on
-#       the India VPS, whose network does not resolve polymarket.com)
+#   NO_RECORDER=1 deploy/run.sh            dashboard only
 #
-# Chainlink needs POLY_API_KEY / POLY_API_SECRET / POLY_API_PASSPHRASE in
-# ./.env (chmod 600, gitignored). Without it the recorder logs "no fair value".
+# Defaults bind the dashboard to 127.0.0.1; reach it with
+#   ssh -N -L 8765:127.0.0.1:8765 <user>@<host>
+#
+# Every source is public (Limitless, Coinbase, Kraken). No credentials.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-PORT="${PORT:-8765}"; CLIP="${CLIP:-5}"; HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-8765}"; CLIP="${CLIP:-5}"; HOST="${HOST:-127.0.0.1}"
 mkdir -p run logs
 
 stop_one() {
